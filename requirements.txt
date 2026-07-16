@@ -1,0 +1,7 @@
+streamlit
+chromadb
+requests
+beautifulsoup4
+google-genai
+openai
+python-dotenv

@@ -1,0 +1,12 @@
+# Segredos
+.env
+
+# Dados locais (regras baixadas e banco vetorial)
+data/*
+!data/.gitkeep
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
