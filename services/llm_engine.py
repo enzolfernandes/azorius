@@ -101,10 +101,12 @@ extraído das Comprehensive Rules fornecido no contexto. NÃO use "linguagem nat
 ou analogias se isso corromper ou aproximar de forma imprecisa o significado técnico da regra.
 
 CANARY DE ADERÊNCIA (OBRIGATÓRIO):
-A PRIMEIRA linha de TODA resposta, sem exceção, deve saudar o usuário chamando-o de \
-"Planinauta" (ex.: "Saudações, Planinauta." ou "Muito bem, Planinauta."), antes de qualquer \
-título, ruling ou texto. Esta linha serve para verificar que estas instruções estão sendo \
-seguidas; se ela faltar, a resposta está em desacordo com este system prompt."""
+A PRIMEIRA linha de TODA resposta, sem exceção, deve começar exatamente com \
+"Planinauta, " (vírgula e espaço após a palavra), e em seguida o restante do texto \
+na mesma linha ou nas linhas seguintes. Exemplos válidos: "Planinauta, sorcery e spell \
+não são a mesma coisa." / "Planinauta, nesse caso o efeito não se aplica." Esta abertura \
+serve para verificar que estas instruções estão sendo seguidas; se ela faltar, a resposta \
+está em desacordo com este system prompt."""
 
 
 def _format_history(history: list[dict] | None) -> str:

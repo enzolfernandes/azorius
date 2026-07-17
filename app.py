@@ -154,7 +154,7 @@ def main() -> None:
             # O modelo de raciocínio fica em silêncio (às vezes por mais de um
             # minuto) antes do primeiro token; o spinner cobre essa espera e
             # some assim que o streaming de fato começa.
-            with st.spinner("O juiz está deliberando... (raciocínio profundo, pode demorar)"):
+            with st.spinner("O Juiz está deliberando... pode demorar um pouco"):
                 first_chunk = next(stream, "")
             answer = st.write_stream(itertools.chain([first_chunk], stream))
         except ProviderError as exc:
