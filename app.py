@@ -10,7 +10,7 @@ import re
 import streamlit as st
 
 from services.config import ConfigError, load_settings
-from services.llm_engine import generate_judge_ruling
+from services.llm_engine import extract_card_names_llm, generate_judge_ruling
 from services.providers import ProviderError, get_provider
 from services.scryfall_api import fetch_card_data
 from services.vector_db import VectorDBError, initialize_db, query_rules
@@ -51,7 +51,7 @@ def render_cards_sidebar(cards: list[dict]) -> None:
     with st.sidebar:
         st.header("Cartas citadas")
         if not cards:
-            st.caption("Nenhuma carta citada. Use [[Nome da Carta]] na pergunta.")
+            st.caption("Nenhuma carta citada ainda. Basta mencionar o nome na pergunta.")
             return
         for card in cards:
             if card["image_url"]:
@@ -64,7 +64,7 @@ def main() -> None:
     st.title("⚖️ Juiz Azorius")
     st.caption(
         "Juiz de Magic: The Gathering (Nível 3) com RAG sobre as Comprehensive Rules. "
-        "Cite cartas entre [[colchetes duplos]]."
+        "Cite cartas pelo nome naturalmente — ou entre [[colchetes duplos]] para forçar."
     )
 
     try:
@@ -85,25 +85,37 @@ def main() -> None:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
-    question = st.chat_input("Ex.: Se eu bloquear com [[Wall of Omens]], o que acontece?")
+    question = st.chat_input("Ex.: Se eu bloquear com Wall of Omens, o que acontece?")
 
     if not question:
         render_cards_sidebar(st.session_state.last_cards)
         return
+
+    # Histórico ANTES da pergunta atual: dá memória à extração e ao ruling.
+    history = list(st.session_state.messages)
 
     st.session_state.messages.append({"role": "user", "content": question})
     with st.chat_message("user"):
         st.markdown(question)
 
     # Passo A/B — cartas citadas na pergunta -> dados oficiais do Scryfall.
+    # Extração híbrida: [[colchetes]] são determinísticos e têm prioridade;
+    # sem eles, o LLM identifica nomes em escrita natural (inclusive PT->EN),
+    # usando o histórico para resolver referências a cartas já discutidas.
     card_names = extract_card_names(question)
+    if not card_names:
+        with st.spinner("Identificando cartas citadas..."):
+            card_names = extract_card_names_llm(provider, question, history)
+
     cards: list[dict] = []
+    missing_cards: list[str] = []
     with st.spinner("Consultando cartas no Scryfall..."):
         for name in card_names:
             card = fetch_card_data(name)
             if card:
                 cards.append(card)
             else:
+                missing_cards.append(name)
                 st.warning(f"Carta não encontrada no Scryfall: {name}")
     st.session_state.last_cards = cards
     render_cards_sidebar(cards)
@@ -120,7 +132,9 @@ def main() -> None:
     with st.chat_message("assistant"):
         try:
             answer = st.write_stream(
-                generate_judge_ruling(provider, cards, rules_context, question)
+                generate_judge_ruling(
+                    provider, cards, rules_context, question, history, missing_cards
+                )
             )
         except ProviderError as exc:
             st.error(str(exc))

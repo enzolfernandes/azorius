@@ -26,8 +26,14 @@ class AIProvider(ABC):
     """Interface comum a todos os provedores de IA."""
 
     @abstractmethod
-    def stream_chat(self, system_prompt: str, user_prompt: str) -> Iterator[str]:
-        """Gera a resposta do LLM em streaming, produzindo pedaços de texto."""
+    def stream_chat(
+        self, system_prompt: str, user_prompt: str, temperature: float | None = None
+    ) -> Iterator[str]:
+        """Gera a resposta do LLM em streaming, produzindo pedaços de texto.
+
+        `temperature=0.0` deixa a saída determinística — útil para tarefas de
+        extração estruturada; None usa o padrão do modelo.
+        """
 
     @abstractmethod
     def embed(self, texts: list[str]) -> list[list[float]]:
@@ -46,14 +52,18 @@ class GeminiProvider(AIProvider):
 
         self._client = genai.Client(api_key=api_key)
 
-    def stream_chat(self, system_prompt: str, user_prompt: str) -> Iterator[str]:
+    def stream_chat(
+        self, system_prompt: str, user_prompt: str, temperature: float | None = None
+    ) -> Iterator[str]:
         from google.genai import types
 
         try:
             stream = self._client.models.generate_content_stream(
                 model=self.CHAT_MODEL,
                 contents=user_prompt,
-                config=types.GenerateContentConfig(system_instruction=system_prompt),
+                config=types.GenerateContentConfig(
+                    system_instruction=system_prompt, temperature=temperature
+                ),
             )
             for chunk in stream:
                 if chunk.text:
@@ -106,8 +116,11 @@ class OpenAIProvider(AIProvider):
 
         self._client = OpenAI(api_key=api_key)
 
-    def stream_chat(self, system_prompt: str, user_prompt: str) -> Iterator[str]:
+    def stream_chat(
+        self, system_prompt: str, user_prompt: str, temperature: float | None = None
+    ) -> Iterator[str]:
         try:
+            kwargs = {"temperature": temperature} if temperature is not None else {}
             stream = self._client.chat.completions.create(
                 model=self.CHAT_MODEL,
                 messages=[
@@ -115,6 +128,7 @@ class OpenAIProvider(AIProvider):
                     {"role": "user", "content": user_prompt},
                 ],
                 stream=True,
+                **kwargs,
             )
             for chunk in stream:
                 delta = chunk.choices[0].delta.content if chunk.choices else None

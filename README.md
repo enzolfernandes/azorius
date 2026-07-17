@@ -47,9 +47,13 @@ apenas o contexto recuperado — sem alucinações.
 
 ## Uso
 
-Digite sua dúvida no chat citando cartas entre colchetes duplos, por exemplo:
+Digite sua dúvida no chat citando as cartas pelo nome, naturalmente:
 
-> Se eu controlo [[Doubling Season]] e uso a habilidade -2 do [[Vraska, Golgari Queen]], quantas lealdades ela perde?
+> Se eu controlo Doubling Season e uso a habilidade -2 da Vraska, Golgari Queen, quantas lealdades ela perde?
+
+O sistema identifica as cartas via LLM (aceita apelidos e nomes em português, traduzindo para o
+nome oficial em inglês). Se quiser forçar um nome exato, use [[colchetes duplos]] — eles têm
+prioridade e pulam a etapa de identificação.
 
 As imagens das cartas citadas aparecem na barra lateral e a resposta do juiz cita os números
 das regras oficiais usadas.
