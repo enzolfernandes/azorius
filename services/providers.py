@@ -23,17 +23,22 @@ class ProviderError(Exception):
 
 
 class AIProvider(ABC):
-    """Interface comum a todos os provedores de IA."""
+    """Interface comum a todos os provedores de IA.
+
+    Dois papéis de modelo, com exigências opostas:
+    - `stream_chat`: o ruling do juiz — usa o modelo mais capaz em raciocínio,
+      priorizando qualidade sobre latência.
+    - `quick_chat`: tarefas mecânicas (extração de cartas, reescrita de
+      consulta) — usa um modelo rápido/barato com saída determinística.
+    """
 
     @abstractmethod
-    def stream_chat(
-        self, system_prompt: str, user_prompt: str, temperature: float | None = None
-    ) -> Iterator[str]:
-        """Gera a resposta do LLM em streaming, produzindo pedaços de texto.
+    def stream_chat(self, system_prompt: str, user_prompt: str) -> Iterator[str]:
+        """Gera o ruling em streaming, com o modelo de raciocínio."""
 
-        `temperature=0.0` deixa a saída determinística — útil para tarefas de
-        extração estruturada; None usa o padrão do modelo.
-        """
+    @abstractmethod
+    def quick_chat(self, system_prompt: str, user_prompt: str) -> str:
+        """Resposta curta e determinística com o modelo utilitário."""
 
     @abstractmethod
     def embed(self, texts: list[str]) -> list[list[float]]:
@@ -41,7 +46,8 @@ class AIProvider(ABC):
 
 
 class GeminiProvider(AIProvider):
-    CHAT_MODEL = "gemini-2.0-flash"
+    RULING_MODEL = "gemini-2.5-flash"
+    UTILITY_MODEL = "gemini-2.0-flash"
     EMBED_MODEL = "gemini-embedding-001"
     MAX_EMBED_RETRIES = 8
     DEFAULT_RETRY_DELAY = 60.0
@@ -52,22 +58,33 @@ class GeminiProvider(AIProvider):
 
         self._client = genai.Client(api_key=api_key)
 
-    def stream_chat(
-        self, system_prompt: str, user_prompt: str, temperature: float | None = None
-    ) -> Iterator[str]:
+    def stream_chat(self, system_prompt: str, user_prompt: str) -> Iterator[str]:
         from google.genai import types
 
         try:
             stream = self._client.models.generate_content_stream(
-                model=self.CHAT_MODEL,
+                model=self.RULING_MODEL,
                 contents=user_prompt,
-                config=types.GenerateContentConfig(
-                    system_instruction=system_prompt, temperature=temperature
-                ),
+                config=types.GenerateContentConfig(system_instruction=system_prompt),
             )
             for chunk in stream:
                 if chunk.text:
                     yield chunk.text
+        except Exception as exc:
+            raise ProviderError(f"Erro na API do Gemini: {exc}") from exc
+
+    def quick_chat(self, system_prompt: str, user_prompt: str) -> str:
+        from google.genai import types
+
+        try:
+            response = self._client.models.generate_content(
+                model=self.UTILITY_MODEL,
+                contents=user_prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_prompt, temperature=0.0
+                ),
+            )
+            return response.text or ""
         except Exception as exc:
             raise ProviderError(f"Erro na API do Gemini: {exc}") from exc
 
@@ -108,7 +125,12 @@ class GeminiProvider(AIProvider):
 
 
 class OpenAIProvider(AIProvider):
-    CHAT_MODEL = "gpt-4o-mini"
+    # Modelo de raciocínio para o ruling: qualidade acima de latência.
+    # Nota: modelos gpt-5+ não aceitam `temperature`; controlamos a
+    # profundidade do raciocínio via `reasoning_effort`.
+    RULING_MODEL = "gpt-5.5"
+    RULING_REASONING_EFFORT = "high"
+    UTILITY_MODEL = "gpt-4.1-mini"
     EMBED_MODEL = "text-embedding-3-small"
 
     def __init__(self, api_key: str):
@@ -116,24 +138,35 @@ class OpenAIProvider(AIProvider):
 
         self._client = OpenAI(api_key=api_key)
 
-    def stream_chat(
-        self, system_prompt: str, user_prompt: str, temperature: float | None = None
-    ) -> Iterator[str]:
+    def stream_chat(self, system_prompt: str, user_prompt: str) -> Iterator[str]:
         try:
-            kwargs = {"temperature": temperature} if temperature is not None else {}
             stream = self._client.chat.completions.create(
-                model=self.CHAT_MODEL,
+                model=self.RULING_MODEL,
+                reasoning_effort=self.RULING_REASONING_EFFORT,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
                 stream=True,
-                **kwargs,
             )
             for chunk in stream:
                 delta = chunk.choices[0].delta.content if chunk.choices else None
                 if delta:
                     yield delta
+        except Exception as exc:
+            raise ProviderError(f"Erro na API da OpenAI: {exc}") from exc
+
+    def quick_chat(self, system_prompt: str, user_prompt: str) -> str:
+        try:
+            response = self._client.chat.completions.create(
+                model=self.UTILITY_MODEL,
+                temperature=0.0,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            )
+            return response.choices[0].message.content or ""
         except Exception as exc:
             raise ProviderError(f"Erro na API da OpenAI: {exc}") from exc
 

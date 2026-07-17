@@ -5,12 +5,17 @@ vive em /services. Aqui apenas orquestramos as chamadas (injetando o provedor
 de IA nos services que precisam dele) e traduzimos erros em mensagens de UI.
 """
 
+import itertools
 import re
 
 import streamlit as st
 
 from services.config import ConfigError, load_settings
-from services.llm_engine import extract_card_names_llm, generate_judge_ruling
+from services.llm_engine import (
+    extract_card_names_llm,
+    generate_judge_ruling,
+    rewrite_rules_query,
+)
 from services.providers import ProviderError, get_provider
 from services.scryfall_api import fetch_card_data
 from services.vector_db import VectorDBError, initialize_db, query_rules
@@ -47,17 +52,24 @@ def extract_card_names(text: str) -> list[str]:
 
 
 def render_cards_sidebar(cards: list[dict]) -> None:
-    """Exibe as imagens das cartas citadas na barra lateral."""
+    """Exibe o histórico de cartas da conversa na barra lateral (recentes no topo)."""
     with st.sidebar:
-        st.header("Cartas citadas")
+        st.header("Histórico de cartas")
         if not cards:
             st.caption("Nenhuma carta citada ainda. Basta mencionar o nome na pergunta.")
             return
         for card in cards:
             if card["image_url"]:
-                st.image(card["image_url"], caption=card["name"], use_container_width=True)
+                st.image(card["image_url"], caption=card["name"], width="stretch")
             else:
                 st.write(f"**{card['name']}** (sem imagem disponível)")
+
+
+def update_card_history(new_cards: list[dict]) -> None:
+    """Acumula cartas no histórico da sessão, sem duplicatas, recentes primeiro."""
+    known = {card["name"].lower() for card in st.session_state.card_history}
+    fresh = [card for card in new_cards if card["name"].lower() not in known]
+    st.session_state.card_history = fresh + st.session_state.card_history
 
 
 def main() -> None:
@@ -78,8 +90,8 @@ def main() -> None:
 
     if "messages" not in st.session_state:
         st.session_state.messages = []
-    if "last_cards" not in st.session_state:
-        st.session_state.last_cards = []
+    if "card_history" not in st.session_state:
+        st.session_state.card_history = []
 
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
@@ -88,7 +100,7 @@ def main() -> None:
     question = st.chat_input("Ex.: Se eu bloquear com Wall of Omens, o que acontece?")
 
     if not question:
-        render_cards_sidebar(st.session_state.last_cards)
+        render_cards_sidebar(st.session_state.card_history)
         return
 
     # Histórico ANTES da pergunta atual: dá memória à extração e ao ruling.
@@ -117,13 +129,18 @@ def main() -> None:
             else:
                 missing_cards.append(name)
                 st.warning(f"Carta não encontrada no Scryfall: {name}")
-    st.session_state.last_cards = cards
-    render_cards_sidebar(cards)
+    update_card_history(cards)
+    render_cards_sidebar(st.session_state.card_history)
 
-    # Passo C — RAG: regras mais similares à pergunta.
+    # Passo C — RAG: reescreve a pergunta como consulta técnica em inglês
+    # (idioma das regras), usando histórico e oracle text para dar contexto a
+    # follow-ups curtos; depois busca as regras mais similares.
     try:
         with st.spinner("Buscando nas Comprehensive Rules..."):
-            rules_context = query_rules(collection, provider.embed, question)
+            search_query = rewrite_rules_query(provider, question, history, cards)
+            rules_context = query_rules(
+                collection, provider.embed, search_query, n_results=8
+            )
     except VectorDBError as exc:
         st.error(str(exc))
         return
@@ -131,11 +148,15 @@ def main() -> None:
     # Passo D/E — injeção de contexto no LLM e streaming da resposta.
     with st.chat_message("assistant"):
         try:
-            answer = st.write_stream(
-                generate_judge_ruling(
-                    provider, cards, rules_context, question, history, missing_cards
-                )
+            stream = generate_judge_ruling(
+                provider, cards, rules_context, question, history, missing_cards
             )
+            # O modelo de raciocínio fica em silêncio (às vezes por mais de um
+            # minuto) antes do primeiro token; o spinner cobre essa espera e
+            # some assim que o streaming de fato começa.
+            with st.spinner("O juiz está deliberando... (raciocínio profundo, pode demorar)"):
+                first_chunk = next(stream, "")
+            answer = st.write_stream(itertools.chain([first_chunk], stream))
         except ProviderError as exc:
             st.error(str(exc))
             return

@@ -43,6 +43,17 @@ Exemplos:
 - Pergunta: "Quantos terrenos posso jogar por turno?" -> {"cards": []}
 - Pergunta: "Minha criatura com trample ataca e ele bloqueia com um token" -> {"cards": []}"""
 
+QUERY_REWRITE_PROMPT = """Você converte a pergunta de um jogador de Magic: The Gathering em uma \
+consulta de busca para as Comprehensive Rules (que estão em INGLÊS).
+
+Regras:
+1. Produza UMA única linha em inglês com a terminologia técnica oficial das regras envolvidas \
+(ex.: "exchange text boxes text-changing effects layers", "replacement effects creating tokens", \
+"combat damage assignment deathtouch trample").
+2. Use o histórico da conversa e o texto das cartas para identificar a mecânica em jogo, mesmo \
+quando a pergunta atual é um follow-up curto (ex.: "e nesse caso?", "mostre em JSON").
+3. NÃO responda a pergunta. Responda APENAS com a consulta, sem aspas nem explicações."""
+
 SYSTEM_PROMPT = """Você é um Juiz de Magic: The Gathering certificado Nível 3, especialista nas \
 Comprehensive Rules. Sua função é dar rulings precisos e imparciais.
 
@@ -50,16 +61,50 @@ REGRAS OBRIGATÓRIAS DE CONDUTA:
 1. Responda APENAS com base no CONTEXTO fornecido (trechos das Comprehensive Rules, \
 texto de oracle das cartas e rulings oficiais). NUNCA invente regras, números de regra, \
 textos de carta ou interações.
-2. SEMPRE cite o número exato da regra que fundamenta cada afirmação (ex.: "conforme a regra 601.2b").
+2. SEMPRE cite o número exato da regra que fundamenta cada afirmação (ex.: "conforme a \
+regra 601.2b") — mas cite SOMENTE números de regra que aparecem literalmente nos trechos \
+do contexto. Se a regra necessária para o ruling não estiver no contexto, declare isso \
+explicitamente em vez de citar um número de memória.
 3. Se o contexto fornecido for insuficiente para responder com certeza, declare explicitamente: \
 "O contexto disponível não é suficiente para um ruling definitivo sobre este ponto" e explique o que falta.
 4. O texto de oracle fornecido é a versão oficial e atual da carta — ele prevalece sobre \
 qualquer versão impressa que o usuário mencione. Se uma carta citada pelo jogador NÃO estiver \
 na seção de cartas do contexto, você NÃO conhece o texto dela: não dê ruling sobre essa carta \
 de memória. Avise que ela não foi localizada e explique como isso limita a resposta.
-5. Responda em Português do Brasil, mas mantenha termos de jogo consagrados em inglês \
-(stack, trigger, oracle text, etc.) quando a tradução gerar ambiguidade.
-6. Estruture a resposta: ruling direto primeiro, fundamentação com citações das regras depois."""
+5. Responda em Português do Brasil. Para termos oficiais de jogo, use a tradução \
+oficial em português seguida do termo oficial em inglês entre parênteses na primeira \
+menção (ex.: "Atropelar (Trample)", "Pilha (the Stack)", "Dano de combate (combat damage)", \
+"Habilidade disparada (triggered ability)"). Nas menções seguintes da mesma resposta, \
+pode usar só o português ou só o inglês, desde que não gere ambiguidade.
+6. Comece respondendo em prosa contínua e natural, como um juiz falando com o jogador: \
+vá direto ao ponto, sem cabeçalhos como "Ruling direto", "Resposta" ou equivalentes. \
+Cite as regras inline no próprio texto quando for natural (ex.: "conforme a regra 307.1"). \
+Ao final, inclua uma seção "Fundamentação" listando as regras usadas e o que cada uma \
+estabelece — essa seção é para consulta do usuário.
+
+DIRETRIZES TÉCNICAS E REGRAS DURAS (HARD RULES):
+1. TAXONOMIA E GLOSSÁRIO ESTRITO: NUNCA confunda "Card Types" (Instant, Sorcery, Creature, \
+Artifact, Enchantment, Land, Planeswalker, Battle, Kindred) com "Subtypes" (Goblin, Arcane, \
+Equipment, etc.) nem com Zonas do jogo (Stack, Battlefield, Graveyard, Library, Hand, Exile, \
+Command). "Spell" (Mágica) NÃO é um tipo de carta: é exclusivamente o estado de qualquer carta \
+(exceto terrenos) enquanto está na Pilha (the Stack). NÃO invente hierarquias entre tipos, \
+subtipos e supertipos que não existem na regra 205.
+2. ALTERAÇÃO DE TEXTO (CAMADA 3): Quando uma carta disser "exchange text box" (trocar caixa de \
+texto) ou copiar um texto, a substituição é 100% integral. É ESTRITAMENTE PROIBIDO mesclar os \
+textos ou criar efeitos "Frankenstein" mantendo habilidades antigas junto das novas. A carta \
+perde TUDO o que tinha no text box e ganha EXATAMENTE o que a outra tinha.
+3. AUTO-REFERÊNCIA: Quando uma carta ganha o texto de outra, qualquer menção ao nome da carta \
+original dentro do texto copiado passa a significar "Este objeto" (a carta que recebeu o texto), \
+e não a carta de origem.
+4. PRIORIDADE DO RAG: Baseie sua resposta puramente na lógica matemática e booleana do texto \
+extraído das Comprehensive Rules fornecido no contexto. NÃO use "linguagem natural coloquial" \
+ou analogias se isso corromper ou aproximar de forma imprecisa o significado técnico da regra.
+
+CANARY DE ADERÊNCIA (OBRIGATÓRIO):
+A PRIMEIRA linha de TODA resposta, sem exceção, deve saudar o usuário chamando-o de \
+"Planinauta" (ex.: "Saudações, Planinauta." ou "Muito bem, Planinauta."), antes de qualquer \
+título, ruling ou texto. Esta linha serve para verificar que estas instruções estão sendo \
+seguidas; se ela faltar, a resposta está em desacordo com este system prompt."""
 
 
 def _format_history(history: list[dict] | None) -> str:
@@ -90,8 +135,8 @@ def extract_card_names_llm(
 ## PERGUNTA ATUAL
 {question}"""
     try:
-        # Temperatura 0: extração estruturada precisa ser determinística.
-        raw = "".join(provider.stream_chat(CARD_EXTRACTION_PROMPT, content, temperature=0.0))
+        # quick_chat: modelo utilitário rápido com saída determinística.
+        raw = provider.quick_chat(CARD_EXTRACTION_PROMPT, content)
     except ProviderError:
         return []
 
@@ -111,6 +156,38 @@ def extract_card_names_llm(
             if cleaned.lower() not in (s.lower() for s in seen):
                 seen.append(cleaned)
     return seen[:MAX_EXTRACTED_CARDS]
+
+
+def rewrite_rules_query(
+    provider: AIProvider,
+    question: str,
+    history: list[dict] | None = None,
+    card_data: list[dict] | None = None,
+) -> str:
+    """Reescreve a pergunta como consulta técnica em inglês para o RAG.
+
+    As Comprehensive Rules estão em inglês; buscar com a pergunta crua em
+    português (ou com follow-ups curtos sem contexto) recupera regras erradas.
+    Melhor esforço: em caso de falha, retorna a pergunta original.
+    """
+    cards_hint = ""
+    if card_data:
+        oracle_lines = "\n".join(
+            f"- {card['name']}: {card['oracle_text']}" for card in card_data
+        )
+        cards_hint = f"\n\n## CARTAS EM DISCUSSÃO (oracle text)\n{oracle_lines}"
+
+    content = f"""## HISTÓRICO DA CONVERSA
+{_format_history(history)}{cards_hint}
+
+## PERGUNTA ATUAL
+{question}"""
+    try:
+        query = provider.quick_chat(QUERY_REWRITE_PROMPT, content).strip()
+    except ProviderError:
+        return question
+    # Uma linha curta em inglês; qualquer coisa fora disso indica falha do modelo.
+    return query.splitlines()[0].strip() if query else question
 
 
 def _format_cards_section(cards: list[dict]) -> str:
