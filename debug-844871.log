@@ -1,2 +1,0 @@
-{"sessionId": "844871", "runId": "post-fix", "hypothesisId": "B", "location": "vector_db.py:initialize_db", "message": "inicio da ingestao incremental", "data": {"total_chunks": 1169, "ja_ingeridos": 0, "pendentes": 1169}, "timestamp": 1784232988145}
-{"sessionId": "844871", "runId": "post-fix", "hypothesisId": "A", "location": "providers.py:GeminiProvider.embed", "message": "modelo sem suporte a lote; fallback item a item", "data": {"batch_start": 0, "enviados": 3, "recebidos": 1}, "timestamp": 1784233208205}

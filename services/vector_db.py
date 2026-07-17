@@ -113,13 +113,6 @@ def initialize_db(
     if not pending:
         return collection
 
-    # #region agent log
-    import json as _json
-    import time as _time
-    with open("debug-844871.log", "a", encoding="utf-8") as _f:
-        _f.write(_json.dumps({"sessionId": "844871", "runId": "post-fix", "hypothesisId": "B", "location": "vector_db.py:initialize_db", "message": "inicio da ingestao incremental", "data": {"total_chunks": len(chunks), "ja_ingeridos": len(existing_ids), "pendentes": len(pending)}, "timestamp": int(_time.time() * 1000)}) + "\n")
-    # #endregion
-
     for start in range(0, len(pending), ADD_BATCH_SIZE):
         batch = pending[start : start + ADD_BATCH_SIZE]
         try:
@@ -132,10 +125,6 @@ def initialize_db(
             embeddings=embeddings,
             metadatas=[{"rule_number": chunk["rule_number"]} for chunk in batch],
         )
-        # #region agent log
-        with open("debug-844871.log", "a", encoding="utf-8") as _f:
-            _f.write(_json.dumps({"sessionId": "844871", "runId": "post-fix", "hypothesisId": "B", "location": "vector_db.py:initialize_db", "message": "lote gravado no chroma", "data": {"batch_start": start, "batch_size": len(batch), "total_na_colecao": collection.count()}, "timestamp": int(_time.time() * 1000)}) + "\n")
-        # #endregion
 
     return collection
 

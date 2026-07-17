@@ -9,10 +9,12 @@ trocar de provedor é alterar uma linha no .env, sem tocar em código.
 
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
+import re
+import time
 
 from .config import Settings
 
-# Limite de itens por requisição nas APIs de embedding (Gemini aceita 100).
+# Limite de itens por requisição nas APIs de embedding.
 EMBED_BATCH_SIZE = 100
 
 
@@ -34,15 +36,14 @@ class AIProvider(ABC):
 
 class GeminiProvider(AIProvider):
     CHAT_MODEL = "gemini-2.0-flash"
-    # gemini-embedding-2: a cota diária gratuita é contada por modelo, e a do
-    # gemini-embedding-001 foi esgotada durante a primeira ingestão.
-    EMBED_MODEL = "gemini-embedding-2"
+    EMBED_MODEL = "gemini-embedding-001"
+    MAX_EMBED_RETRIES = 8
+    DEFAULT_RETRY_DELAY = 60.0
 
     def __init__(self, api_key: str):
         # Import local: quem usa OpenAI não precisa do SDK do Google carregado.
         from google import genai
 
-        self._genai = genai
         self._client = genai.Client(api_key=api_key)
 
     def stream_chat(self, system_prompt: str, user_prompt: str) -> Iterator[str]:
@@ -60,11 +61,6 @@ class GeminiProvider(AIProvider):
         except Exception as exc:
             raise ProviderError(f"Erro na API do Gemini: {exc}") from exc
 
-    # A cota gratuita conta cada CONTEÚDO embedado (100/min), não cada request;
-    # por isso o retry honra o retryDelay informado pela API no erro 429.
-    MAX_EMBED_RETRIES = 8
-    DEFAULT_RETRY_DELAY = 60.0
-
     def embed(self, texts: list[str]) -> list[list[float]]:
         vectors: list[list[float]] = []
         for start in range(0, len(texts), EMBED_BATCH_SIZE):
@@ -73,23 +69,14 @@ class GeminiProvider(AIProvider):
             if len(got) == len(batch):
                 vectors.extend(got)
                 continue
-            # Modelos como o gemini-embedding-2 ignoram o lote e devolvem um
-            # único vetor por requisição; nesse caso embedamos item a item.
-            # #region agent log
-            import json as _json
-            import time as _time
-            with open("debug-844871.log", "a", encoding="utf-8") as _f:
-                _f.write(_json.dumps({"sessionId": "844871", "runId": "post-fix", "hypothesisId": "A", "location": "providers.py:GeminiProvider.embed", "message": "modelo sem suporte a lote; fallback item a item", "data": {"batch_start": start, "enviados": len(batch), "recebidos": len(got)}, "timestamp": int(_time.time() * 1000)}) + "\n")
-            # #endregion
+            # Alguns modelos de embedding do Gemini ignoram o lote e devolvem
+            # um único vetor; nesse caso embedamos item a item.
             for text in batch:
                 vectors.extend(self._embed_with_retry([text]))
         return vectors
 
     def _embed_with_retry(self, contents: list[str]) -> list[list[float]]:
         """Chama embed_content com retry que honra o retryDelay dos erros 429."""
-        import re
-        import time
-
         for attempt in range(self.MAX_EMBED_RETRIES):
             try:
                 result = self._client.models.embed_content(
@@ -103,11 +90,6 @@ class GeminiProvider(AIProvider):
                     raise ProviderError(f"Erro ao gerar embeddings no Gemini: {exc}") from exc
                 match = re.search(r"retry in ([\d.]+)s", message, re.IGNORECASE)
                 delay = float(match.group(1)) + 2.0 if match else self.DEFAULT_RETRY_DELAY
-                # #region agent log
-                import json as _json
-                with open("debug-844871.log", "a", encoding="utf-8") as _f:
-                    _f.write(_json.dumps({"sessionId": "844871", "runId": "post-fix", "hypothesisId": "A", "location": "providers.py:GeminiProvider._embed_with_retry", "message": "429 na cota de embeddings; aguardando retry", "data": {"n_contents": len(contents), "attempt": attempt, "delay_s": delay}, "timestamp": int(time.time() * 1000)}) + "\n")
-                # #endregion
                 time.sleep(delay)
         raise ProviderError(
             "Cota de embeddings do Gemini esgotada mesmo após várias tentativas. "
