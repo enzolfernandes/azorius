@@ -15,6 +15,9 @@ from .providers import AIProvider, ProviderError
 # Limita as consultas subsequentes ao Scryfall em perguntas muito longas.
 MAX_EXTRACTED_CARDS = 6
 
+# Respostas de metagame/listas citam mais cartas (top N + menções honrosas).
+MAX_ANSWER_EXTRACTED_CARDS = 30
+
 # Mensagens recentes injetadas nos prompts para dar memória à conversa sem
 # estourar o orçamento de tokens.
 MAX_HISTORY_MESSAGES = 10
@@ -30,18 +33,44 @@ no histórico da conversa. Não deixe nenhuma carta mencionada de fora.
 Se NÃO tiver certeza da tradução, retorne o nome EXATAMENTE como o jogador escreveu, no idioma \
 original, corrigindo apenas erros de digitação ("Procissão dos Unigdos" -> "Procissão dos Ungidos"). \
 NUNCA invente uma tradução aproximada — o sistema resolve nomes oficiais em qualquer idioma.
-3. NÃO inclua termos genéricos do jogo (criatura, terreno, mágica, token, comandante, instantânea) \
+3. NUNCA substitua uma carta por outra que só compartilha parte do nome. Se o jogador escreveu um \
+nome composto, preserve essas palavras (ex.: "Hazezon Shaper of Sand" → "Hazezon, Shaper of Sand"; \
+NÃO "Hazezon Tamar"). Em dúvida entre cartas parecidas, devolva o texto do jogador sem "corrigir".
+4. NÃO inclua termos genéricos do jogo (criatura, terreno, mágica, token, comandante, instantânea) \
 nem tipos ou palavras comuns que coincidem com nomes de cartas, a menos que o texto trate \
 claramente da carta específica.
-4. NÃO deduza cartas que não foram mencionadas.
-5. Responda APENAS com JSON válido, sem texto adicional: {"cards": ["Nome 1"]} ou {"cards": []}
+5. NÃO deduza cartas que não foram mencionadas.
+6. Responda APENAS com JSON válido, sem texto adicional: {"cards": ["Nome 1"]} ou {"cards": []}
 
 Exemplos:
 - Pergunta: "Posso dar bolt no comandante dele?" -> {"cards": ["Lightning Bolt"]}
 - Pergunta: "Com Vidas Paralelas e Temporada da Multiplicação em campo, quantos tokens crio?" -> {"cards": ["Parallel Lives", "Temporada da Multiplicação"]}
+- Pergunta: "Quais cartas combinam com Hazezon Shaper of Sand?" -> {"cards": ["Hazezon, Shaper of Sand"]}
 - Pergunta: "E se a minha muralha tiver deathtouch?" com histórico citando Wall of Omens -> {"cards": ["Wall of Omens"]}
 - Pergunta: "Quantos terrenos posso jogar por turno?" -> {"cards": []}
 - Pergunta: "Minha criatura com trample ataca e ele bloqueia com um token" -> {"cards": []}"""
+
+ANSWER_CARD_EXTRACTION_PROMPT = """Você extrai nomes de cartas de Magic: The Gathering citadas \
+em uma RESPOSTA de um juiz ou consultor de deck.
+
+Regras:
+1. Extraia TODAS as cartas específicas mencionadas pelo nome: top N, listas, menções \
+honrosas, alternativas separadas por "/" e recomendações no texto.
+2. Preserve a ORDEM de primeira aparição no texto (top N na ordem numerada, depois menções \
+honrosas na ordem em que foram listadas). Não reordene por alfabeto nem por importância.
+3. Se o texto já usa o nome oficial em inglês, preserve-o. Se tiver CERTEZA do nome oficial \
+em inglês a partir de uma menção clara, use-o. NÃO invente traduções aproximadas.
+4. NUNCA substitua uma carta por outra que só compartilha parte do nome.
+5. NÃO inclua termos genéricos, tipos, mecânicas (Desert, Trample, token) nem nomes de \
+tokens de criatura sem carta real (ex.: "Guerreiros de Areia").
+6. NÃO invente cartas ausentes do texto.
+7. Responda APENAS com JSON válido, sem texto adicional: {"cards": ["Nome 1"]} ou {"cards": []}
+
+Exemplos:
+- "Meu top 5: Dune Chanter; Scapeshift; Ancient Greenwarden." -> {"cards": ["Dune Chanter", "Scapeshift", "Ancient Greenwarden"]}
+- "Anointed Procession / Mondrak, Glory Dominus" -> {"cards": ["Anointed Procession", "Mondrak, Glory Dominus"]}
+- "Menções honrosas: Field of the Dead, Life from the Loam." -> {"cards": ["Field of the Dead", "Life from the Loam"]}
+- "Nesse caso a habilidade não dispara." -> {"cards": []}"""
 
 QUERY_REWRITE_PROMPT = """Você converte a pergunta de um jogador de Magic: The Gathering em uma \
 consulta de busca para as Comprehensive Rules (que estão em INGLÊS).
@@ -140,6 +169,25 @@ def _format_history(history: list[dict] | None) -> str:
     )
 
 
+def _parse_card_names_json(raw: str, limit: int) -> list[str]:
+    """Extrai a lista `cards` de uma resposta JSON (possivelmente envolvida em texto)."""
+    match = re.search(r"\{.*\}", raw, re.DOTALL)
+    if not match:
+        return []
+    try:
+        names = json.loads(match.group(0)).get("cards", [])
+    except (json.JSONDecodeError, AttributeError):
+        return []
+
+    seen: list[str] = []
+    for name in names:
+        if isinstance(name, str) and name.strip():
+            cleaned = name.strip()
+            if cleaned.lower() not in (s.lower() for s in seen):
+                seen.append(cleaned)
+    return seen[:limit]
+
+
 def extract_card_names_llm(
     provider: AIProvider, question: str, history: list[dict] | None = None
 ) -> list[str]:
@@ -161,23 +209,25 @@ def extract_card_names_llm(
         raw = provider.quick_chat(CARD_EXTRACTION_PROMPT, content)
     except ProviderError:
         return []
+    return _parse_card_names_json(raw, MAX_EXTRACTED_CARDS)
 
-    # O modelo pode envolver o JSON em texto ou cercas de código.
-    match = re.search(r"\{.*\}", raw, re.DOTALL)
-    if not match:
+
+def extract_card_names_from_answer(provider: AIProvider, answer: str) -> list[str]:
+    """Identifica cartas citadas na resposta do juiz (listas, recomendações, etc.).
+
+    Usado após a geração para popular o histórico com cartas que o juiz
+    mencionou, mas que não estavam na pergunta. Melhor esforço: falha
+    silenciosa retorna lista vazia.
+    """
+    if not answer.strip():
         return []
+    content = f"""## RESPOSTA DO JUIZ
+{answer}"""
     try:
-        names = json.loads(match.group(0)).get("cards", [])
-    except (json.JSONDecodeError, AttributeError):
+        raw = provider.quick_chat(ANSWER_CARD_EXTRACTION_PROMPT, content)
+    except ProviderError:
         return []
-
-    seen: list[str] = []
-    for name in names:
-        if isinstance(name, str) and name.strip():
-            cleaned = name.strip()
-            if cleaned.lower() not in (s.lower() for s in seen):
-                seen.append(cleaned)
-    return seen[:MAX_EXTRACTED_CARDS]
+    return _parse_card_names_json(raw, MAX_ANSWER_EXTRACTED_CARDS)
 
 
 def rewrite_rules_query(

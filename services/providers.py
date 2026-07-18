@@ -1,10 +1,11 @@
 """Factory de provedores de IA (LLM + embeddings).
 
 Este módulo é o ponto único de injeção de dependência da aplicação: ele traduz
-a configuração do .env em um objeto `AIProvider` concreto (Gemini ou OpenAI)
-com uma interface comum. Os demais services (`vector_db`, `llm_engine`)
-recebem esse objeto como parâmetro e nunca sabem qual provedor está por trás —
-trocar de provedor é alterar uma linha no .env, sem tocar em código.
+a configuração do .env (ou da UI) em um objeto `AIProvider` concreto
+(Gemini, OpenAI ou Claude) com uma interface comum. Os demais services
+(`vector_db`, `llm_engine`) recebem esse objeto como parâmetro e nunca sabem
+qual provedor está por trás — trocar de provedor é alterar a configuração,
+sem tocar em código.
 """
 
 from abc import ABC, abstractmethod
@@ -184,8 +185,77 @@ class OpenAIProvider(AIProvider):
             raise ProviderError(f"Erro ao gerar embeddings na OpenAI: {exc}") from exc
 
 
+class ClaudeProvider(AIProvider):
+    """Claude (Anthropic) para chat; embeddings locais (MiniLM via Chroma).
+
+    A API da Anthropic não oferece embeddings. Para manter uma única chave
+    (`ANTHROPIC_API_KEY`) e um índice Chroma separado (`chroma/claude`), o
+    RAG usa a DefaultEmbeddingFunction do ChromaDB.
+    """
+
+    RULING_MODEL = "claude-sonnet-4-5"
+    UTILITY_MODEL = "claude-haiku-4-5"
+    # Respostas de juiz podem ser longas (fundamentação + listas).
+    RULING_MAX_TOKENS = 8192
+    UTILITY_MAX_TOKENS = 1024
+
+    def __init__(self, api_key: str):
+        from anthropic import Anthropic
+
+        self._client = Anthropic(api_key=api_key)
+        self._embedder = None
+
+    def stream_chat(self, system_prompt: str, user_prompt: str) -> Iterator[str]:
+        try:
+            with self._client.messages.stream(
+                model=self.RULING_MODEL,
+                max_tokens=self.RULING_MAX_TOKENS,
+                system=system_prompt,
+                messages=[{"role": "user", "content": user_prompt}],
+            ) as stream:
+                for text in stream.text_stream:
+                    if text:
+                        yield text
+        except Exception as exc:
+            raise ProviderError(f"Erro na API do Claude: {exc}") from exc
+
+    def quick_chat(self, system_prompt: str, user_prompt: str) -> str:
+        try:
+            response = self._client.messages.create(
+                model=self.UTILITY_MODEL,
+                max_tokens=self.UTILITY_MAX_TOKENS,
+                temperature=0.0,
+                system=system_prompt,
+                messages=[{"role": "user", "content": user_prompt}],
+            )
+            parts = [
+                block.text
+                for block in response.content
+                if getattr(block, "type", None) == "text" and getattr(block, "text", None)
+            ]
+            return "".join(parts)
+        except Exception as exc:
+            raise ProviderError(f"Erro na API do Claude: {exc}") from exc
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        try:
+            if self._embedder is None:
+                from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+
+                self._embedder = DefaultEmbeddingFunction()
+            vectors: list[list[float]] = []
+            for start in range(0, len(texts), EMBED_BATCH_SIZE):
+                batch = texts[start : start + EMBED_BATCH_SIZE]
+                vectors.extend(self._embedder(batch))
+            return vectors
+        except Exception as exc:
+            raise ProviderError(f"Erro ao gerar embeddings locais (Claude/RAG): {exc}") from exc
+
+
 def get_provider(settings: Settings) -> AIProvider:
     """Factory: instancia o provedor concreto a partir das configurações."""
     if settings.llm_provider == "gemini":
         return GeminiProvider(api_key=settings.api_key)
+    if settings.llm_provider == "claude":
+        return ClaudeProvider(api_key=settings.api_key)
     return OpenAIProvider(api_key=settings.api_key)

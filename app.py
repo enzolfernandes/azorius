@@ -10,8 +10,16 @@ import re
 
 import streamlit as st
 
-from services.config import ConfigError, load_settings
+from services.config import (
+    CHROMA_DIR,
+    VALID_PROVIDERS,
+    ConfigError,
+    api_key_from_env,
+    env_defaults,
+    settings_from_values,
+)
 from services.llm_engine import (
+    extract_card_names_from_answer,
     extract_card_names_llm,
     generate_judge_ruling,
     rewrite_rules_query,
@@ -27,18 +35,16 @@ st.set_page_config(page_title="Juiz Azorius — MTG", page_icon="⚖️", layout
 
 
 # ---------------------------------------------------------------------------
-# Bootstrap (cacheado): configuração, provedor de IA e banco vetorial.
-# `st.cache_resource` garante uma única instância por processo — é a única
-# concessão de estado nesta camada; os services permanecem puros.
+# Banco vetorial cacheado por provedor (Gemini ≠ OpenAI embeddings).
+# `_api_key` não entra na chave do cache: trocar a chave no mesmo provedor
+# não reingesta; a primeira ingestão usa a chave de quem disparou o cache.
 # ---------------------------------------------------------------------------
 @st.cache_resource(show_spinner="Inicializando o banco de regras (primeira execução demora)...")
-def bootstrap():
-    settings = load_settings()
-    # Injeção de dependência: o provedor concreto (Gemini/OpenAI) é criado
-    # aqui, uma única vez, e repassado aos services como parâmetro.
-    provider = get_provider(settings)
-    collection = initialize_db(embed_fn=provider.embed)
-    return provider, collection
+def get_collection(provider_name: str, _api_key: str):
+    settings = settings_from_values(provider_name, _api_key)
+    embed_provider = get_provider(settings)
+    persist_dir = CHROMA_DIR / provider_name
+    return initialize_db(embed_fn=embed_provider.embed, persist_dir=persist_dir)
 
 
 def extract_card_names(text: str) -> list[str]:
@@ -49,6 +55,58 @@ def extract_card_names(text: str) -> list[str]:
         if cleaned and cleaned.lower() not in (s.lower() for s in seen):
             seen.append(cleaned)
     return seen
+
+
+def render_provider_sidebar() -> None:
+    """Provedor + chave de API na sidebar (session_state, fallback .env)."""
+    if "llm_provider" not in st.session_state or "api_key" not in st.session_state:
+        default_provider, default_key = env_defaults()
+        st.session_state.llm_provider = default_provider
+        st.session_state.api_key = default_key
+
+    with st.sidebar:
+        st.header("Configuração")
+        provider_options = list(VALID_PROVIDERS)
+        try:
+            default_index = provider_options.index(st.session_state.llm_provider)
+        except ValueError:
+            default_index = 0
+
+        if "ui_llm_provider" not in st.session_state:
+            st.session_state.ui_llm_provider = provider_options[default_index]
+
+        provider = st.selectbox(
+            "Provedor de LLM",
+            options=provider_options,
+            key="ui_llm_provider",
+        )
+        key_label = {
+            "gemini": "Google API Key",
+            "openai": "OpenAI API Key",
+            "claude": "Anthropic API Key",
+        }.get(provider, "API Key")
+        widget_key = f"ui_api_key_{provider}"
+        if widget_key not in st.session_state:
+            if provider == st.session_state.llm_provider and st.session_state.api_key:
+                st.session_state[widget_key] = st.session_state.api_key
+            else:
+                st.session_state[widget_key] = api_key_from_env(provider)
+
+        api_key = st.text_input(
+            key_label,
+            type="password",
+            key=widget_key,
+            help="A chave fica só nesta sessão do navegador; não é gravada em disco.",
+        )
+        if st.button("Aplicar", type="primary", use_container_width=True):
+            st.session_state.llm_provider = provider
+            st.session_state.api_key = api_key.strip()
+            st.rerun()
+
+        st.caption(
+            "Opcional: preencha um `.env` local para uso solo. "
+            "Em demo compartilhada, cada pessoa usa a própria chave."
+        )
 
 
 def render_cards_sidebar(cards: list[dict]) -> None:
@@ -66,10 +124,60 @@ def render_cards_sidebar(cards: list[dict]) -> None:
 
 
 def update_card_history(new_cards: list[dict]) -> None:
-    """Acumula cartas no histórico da sessão, sem duplicatas, recentes primeiro."""
+    """Insere o lote no topo do histórico, preservando a ordem do lote.
+
+    A primeira carta de `new_cards` fica no topo; duplicatas dentro do lote
+    e no histórico antigo são removidas (prevalece a posição no lote novo).
+    """
+    if not new_cards:
+        return
+    ordered: list[dict] = []
+    seen: set[str] = set()
+    for card in new_cards:
+        key = card["name"].lower()
+        if key in seen:
+            continue
+        ordered.append(card)
+        seen.add(key)
+    history = [
+        card
+        for card in st.session_state.card_history
+        if card["name"].lower() not in seen
+    ]
+    st.session_state.card_history = ordered + history
+
+
+def resolve_cards(
+    names: list[str],
+    *,
+    context: str,
+    warn_missing: bool = False,
+    skip_known: bool = True,
+) -> tuple[list[dict], list[str]]:
+    """Resolve nomes no Scryfall.
+
+    Retorna `(cartas_resolvidas, nomes_não_encontrados)`. Com `skip_known`,
+    ignora nomes já presentes no histórico (útil na extração pós-resposta).
+    """
     known = {card["name"].lower() for card in st.session_state.card_history}
-    fresh = [card for card in new_cards if card["name"].lower() not in known]
-    st.session_state.card_history = fresh + st.session_state.card_history
+    resolved: list[dict] = []
+    missing: list[str] = []
+    seen_resolved: set[str] = set()
+    for name in names:
+        if skip_known and name.lower() in known:
+            continue
+        card = fetch_card_data(name, question=context)
+        if card is None:
+            missing.append(name)
+            if warn_missing:
+                st.warning(f"Carta não encontrada no Scryfall: {name}")
+            continue
+        key = card["name"].lower()
+        if key in seen_resolved or (skip_known and key in known):
+            continue
+        resolved.append(card)
+        seen_resolved.add(key)
+    return resolved, missing
 
 
 def main() -> None:
@@ -79,12 +187,25 @@ def main() -> None:
         "Cite cartas pelo nome naturalmente — ou entre [[colchetes duplos]] para forçar."
     )
 
+    render_provider_sidebar()
+
     try:
-        provider, collection = bootstrap()
+        settings = settings_from_values(
+            st.session_state.llm_provider, st.session_state.api_key
+        )
     except ConfigError as exc:
-        st.error(f"Configuração inválida: {exc}")
+        st.info(
+            "Configure o **provedor** e a **chave de API** na barra lateral e clique em "
+            "**Aplicar**. Você também pode usar um arquivo `.env` local "
+            "(ver README)."
+        )
+        st.warning(str(exc))
         st.stop()
-    except (VectorDBError, ProviderError) as exc:
+
+    try:
+        provider = get_provider(settings)
+        collection = get_collection(settings.llm_provider, settings.api_key)
+    except (VectorDBError, ProviderError, ConfigError) as exc:
         st.error(str(exc))
         st.stop()
 
@@ -122,15 +243,11 @@ def main() -> None:
     cards: list[dict] = []
     missing_cards: list[str] = []
     with st.spinner("Consultando cartas no Scryfall..."):
-        for name in card_names:
-            card = fetch_card_data(name)
-            if card:
-                cards.append(card)
-            else:
-                missing_cards.append(name)
-                st.warning(f"Carta não encontrada no Scryfall: {name}")
-    update_card_history(cards)
-    render_cards_sidebar(st.session_state.card_history)
+        # `question` ancora a resolução: evita que o LLM troque uma carta
+        # por outra só parecida (ex.: Hazezon Tamar ≠ Hazezon, Shaper of Sand).
+        cards, missing_cards = resolve_cards(
+            card_names, context=question, warn_missing=True, skip_known=False
+        )
 
     # Passo C — RAG: reescreve a pergunta como consulta técnica em inglês
     # (idioma das regras), usando histórico e oracle text para dar contexto a
@@ -143,6 +260,8 @@ def main() -> None:
             )
     except VectorDBError as exc:
         st.error(str(exc))
+        update_card_history(cards)
+        render_cards_sidebar(st.session_state.card_history)
         return
 
     # Passo D/E — injeção de contexto no LLM e streaming da resposta.
@@ -159,9 +278,19 @@ def main() -> None:
             answer = st.write_stream(itertools.chain([first_chunk], stream))
         except ProviderError as exc:
             st.error(str(exc))
+            update_card_history(cards)
+            render_cards_sidebar(st.session_state.card_history)
             return
 
     st.session_state.messages.append({"role": "assistant", "content": answer})
+
+    # Passo F — histórico: foco da pergunta, depois cartas da resposta na
+    # ordem em que aparecem no texto (top N → menções honrosas).
+    with st.spinner("Atualizando histórico de cartas..."):
+        answer_names = extract_card_names_from_answer(provider, answer)
+        answer_cards, _ = resolve_cards(answer_names, context=answer)
+        update_card_history(cards + answer_cards)
+    render_cards_sidebar(st.session_state.card_history)
 
 
 main()

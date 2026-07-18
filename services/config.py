@@ -1,9 +1,8 @@
 """Ponto único de configuração da aplicação.
 
-Carrega o .env e expõe um objeto imutável de configuração. Nenhum outro módulo
-deve ler variáveis de ambiente diretamente — isso mantém a configuração
-centralizada e facilita a futura migração para FastAPI (basta trocar a origem
-das variáveis, os services não mudam).
+Carrega o .env (fallback para uso solo) e expõe um objeto imutável de
+configuração. A UI pode montar Settings a partir de valores da sessão sem
+ler o ambiente diretamente — nenhum outro módulo deve chamar os.getenv.
 """
 
 import os
@@ -38,11 +37,17 @@ CHROMA_DIR = _resolve_chroma_dir()
 
 load_dotenv(PROJECT_ROOT / ".env")
 
-VALID_PROVIDERS = ("gemini", "openai")
+VALID_PROVIDERS = ("gemini", "openai", "claude")
+
+_PROVIDER_KEY_VARS = {
+    "gemini": "GOOGLE_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "claude": "ANTHROPIC_API_KEY",
+}
 
 
 class ConfigError(Exception):
-    """Configuração ausente ou inválida no .env."""
+    """Configuração ausente ou inválida."""
 
 
 @dataclass(frozen=True)
@@ -51,21 +56,48 @@ class Settings:
     api_key: str
 
 
-def load_settings() -> Settings:
-    """Lê e valida o .env, retornando as configurações da aplicação.
+def _key_var_for(provider: str) -> str:
+    return _PROVIDER_KEY_VARS[provider]
 
-    Levanta ConfigError com mensagem clara se o provedor for inválido ou a
-    chave de API correspondente estiver ausente.
-    """
+
+def settings_from_values(provider: str, api_key: str) -> Settings:
+    """Valida provedor + chave e devolve Settings imutável."""
+    normalized = provider.strip().lower()
+    if normalized not in VALID_PROVIDERS:
+        raise ConfigError(
+            f"Provedor inválido: '{provider}'. Use um de: {', '.join(VALID_PROVIDERS)}."
+        )
+    key = api_key.strip()
+    if not key:
+        raise ConfigError(
+            f"Chave de API não informada (obrigatória para provedor={normalized})."
+        )
+    return Settings(llm_provider=normalized, api_key=key)
+
+
+def api_key_from_env(provider: str) -> str:
+    """Lê do .env a chave correspondente ao provedor (pode ser string vazia)."""
+    normalized = provider.strip().lower()
+    if normalized not in VALID_PROVIDERS:
+        return ""
+    return os.getenv(_key_var_for(normalized), "").strip()
+
+
+def env_defaults() -> tuple[str, str]:
+    """Retorna (provedor, chave) sugeridos pelo .env para pré-preencher a UI."""
     provider = os.getenv("LLM_PROVIDER", "gemini").strip().lower()
     if provider not in VALID_PROVIDERS:
+        provider = "gemini"
+    return provider, api_key_from_env(provider)
+
+
+def load_settings() -> Settings:
+    """Lê e valida o .env (uso solo / scripts). Preferir settings_from_values na UI."""
+    provider, api_key = env_defaults()
+    try:
+        return settings_from_values(provider, api_key)
+    except ConfigError as exc:
+        key_var = _key_var_for(provider)
         raise ConfigError(
-            f"LLM_PROVIDER inválido: '{provider}'. Use um de: {', '.join(VALID_PROVIDERS)}."
-        )
-
-    key_var = "GOOGLE_API_KEY" if provider == "gemini" else "OPENAI_API_KEY"
-    api_key = os.getenv(key_var, "").strip()
-    if not api_key:
-        raise ConfigError(f"{key_var} não definida no .env (obrigatória para LLM_PROVIDER={provider}).")
-
-    return Settings(llm_provider=provider, api_key=api_key)
+            f"{key_var} não definida no .env (obrigatória para LLM_PROVIDER={provider})."
+        ) from exc
