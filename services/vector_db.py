@@ -14,6 +14,7 @@ from pathlib import Path
 import chromadb
 
 from .config import CHROMA_DIR, RULES_FILE
+from .rules_setup import RulesDownloadError, ensure_rules_file
 
 COLLECTION_NAME = "mtg_comprehensive_rules"
 
@@ -98,10 +99,14 @@ def initialize_db(
     if not rules_path.exists():
         if collection.count() > 0:
             return collection
-        raise VectorDBError(
-            f"Arquivo de regras não encontrado em {rules_path}. "
-            "Execute 'python scripts/setup_rules.py' primeiro."
-        )
+        try:
+            ensure_rules_file(rules_path)
+        except RulesDownloadError as exc:
+            raise VectorDBError(
+                f"Arquivo de regras não encontrado em {rules_path} e o download "
+                f"automático falhou: {exc}. Execute 'python scripts/setup_rules.py' "
+                "ou baixe o .txt em https://magic.wizards.com/en/rules."
+            ) from exc
 
     rules_text = rules_path.read_text(encoding="utf-8")
     chunks = parse_rules_chunks(rules_text)
