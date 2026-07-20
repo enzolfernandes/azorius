@@ -1,4 +1,4 @@
-"""Interface Streamlit do Juiz de MTG.
+"""Interface Streamlit do Juiz / Deckbuilder de MTG.
 
 Este arquivo é EXCLUSIVAMENTE camada de apresentação: toda a lógica de negócio
 vive em /services. Aqui apenas orquestramos as chamadas (injetando o provedor
@@ -19,6 +19,8 @@ from services.config import (
     settings_from_values,
 )
 from services.llm_engine import (
+    DECKBUILDER_BOOTSTRAP_MESSAGE,
+    chat_deckbuilder,
     extract_card_names_from_answer,
     extract_card_names_llm,
     generate_judge_ruling,
@@ -31,7 +33,10 @@ from services.vector_db import VectorDBError, initialize_db, query_rules
 # Convenção da comunidade MTG: cartas citadas entre [[colchetes duplos]].
 CARD_MENTION_PATTERN = re.compile(r"\[\[([^\[\]]+)\]\]")
 
-st.set_page_config(page_title="Juiz Azorius — MTG", page_icon="⚖️", layout="wide")
+MODE_JUDGE = "Modo Juiz"
+MODE_DECKBUILDER = "Modo Deckbuilder"
+
+st.set_page_config(page_title="Azorius — MTG", page_icon="⚖️", layout="wide")
 
 
 # ---------------------------------------------------------------------------
@@ -57,14 +62,39 @@ def extract_card_names(text: str) -> list[str]:
     return seen
 
 
-def render_provider_sidebar() -> None:
-    """Provedor + chave de API na sidebar (session_state, fallback .env)."""
+def _bootstrap_deckbuilder_chat() -> None:
+    """Limpa o chat do Deckbuilder e injeta o gatilho inicial (sem API)."""
+    st.session_state.deckbuilder_messages = [
+        {"role": "assistant", "content": DECKBUILDER_BOOTSTRAP_MESSAGE}
+    ]
+
+
+def render_mode_and_provider_sidebar() -> str:
+    """Modo da app + provedor/chave. Detecta troca para o Deckbuilder."""
+    if "app_mode" not in st.session_state:
+        st.session_state.app_mode = MODE_JUDGE
+    if "_prev_app_mode" not in st.session_state:
+        st.session_state._prev_app_mode = st.session_state.app_mode
     if "llm_provider" not in st.session_state or "api_key" not in st.session_state:
         default_provider, default_key = env_defaults()
         st.session_state.llm_provider = default_provider
         st.session_state.api_key = default_key
+    if "judge_messages" not in st.session_state:
+        st.session_state.judge_messages = []
+    if "deckbuilder_messages" not in st.session_state:
+        st.session_state.deckbuilder_messages = []
+    if "card_history" not in st.session_state:
+        st.session_state.card_history = []
 
     with st.sidebar:
+        st.header("Modo")
+        st.radio(
+            "Escolha o modo",
+            options=[MODE_JUDGE, MODE_DECKBUILDER],
+            key="app_mode",
+            label_visibility="collapsed",
+        )
+
         st.header("Configuração")
         provider_options = list(VALID_PROVIDERS)
         try:
@@ -108,6 +138,15 @@ def render_provider_sidebar() -> None:
             "Em demo compartilhada, cada pessoa usa a própria chave."
         )
 
+    current = st.session_state.app_mode
+    previous = st.session_state._prev_app_mode
+    if current == MODE_DECKBUILDER and previous != MODE_DECKBUILDER:
+        _bootstrap_deckbuilder_chat()
+    elif current == MODE_DECKBUILDER and not st.session_state.deckbuilder_messages:
+        _bootstrap_deckbuilder_chat()
+    st.session_state._prev_app_mode = current
+    return current
+
 
 def render_cards_sidebar(cards: list[dict]) -> None:
     """Exibe o histórico de cartas da conversa na barra lateral (recentes no topo)."""
@@ -117,18 +156,14 @@ def render_cards_sidebar(cards: list[dict]) -> None:
             st.caption("Nenhuma carta citada ainda. Basta mencionar o nome na pergunta.")
             return
         for card in cards:
-            if card["image_url"]:
+            if card.get("image_url"):
                 st.image(card["image_url"], caption=card["name"], width="stretch")
             else:
                 st.write(f"**{card['name']}** (sem imagem disponível)")
 
 
 def update_card_history(new_cards: list[dict]) -> None:
-    """Insere o lote no topo do histórico, preservando a ordem do lote.
-
-    A primeira carta de `new_cards` fica no topo; duplicatas dentro do lote
-    e no histórico antigo são removidas (prevalece a posição no lote novo).
-    """
+    """Insere o lote no topo do histórico, preservando a ordem do lote."""
     if not new_cards:
         return
     ordered: list[dict] = []
@@ -154,11 +189,7 @@ def resolve_cards(
     warn_missing: bool = False,
     skip_known: bool = True,
 ) -> tuple[list[dict], list[str]]:
-    """Resolve nomes no Scryfall.
-
-    Retorna `(cartas_resolvidas, nomes_não_encontrados)`. Com `skip_known`,
-    ignora nomes já presentes no histórico (útil na extração pós-resposta).
-    """
+    """Resolve nomes no Scryfall."""
     known = {card["name"].lower() for card in st.session_state.card_history}
     resolved: list[dict] = []
     missing: list[str] = []
@@ -180,15 +211,8 @@ def resolve_cards(
     return resolved, missing
 
 
-def main() -> None:
-    st.title("⚖️ Juiz Azorius")
-    st.caption(
-        "Juiz de Magic: The Gathering (Nível 3) com RAG sobre as Comprehensive Rules. "
-        "Cite cartas pelo nome naturalmente — ou entre [[colchetes duplos]] para forçar."
-    )
-
-    render_provider_sidebar()
-
+def resolve_provider():
+    """Valida settings da sessão e devolve o AIProvider (ou interrompe a UI)."""
     try:
         settings = settings_from_values(
             st.session_state.llm_provider, st.session_state.api_key
@@ -203,18 +227,27 @@ def main() -> None:
         st.stop()
 
     try:
-        provider = get_provider(settings)
+        return get_provider(settings), settings
+    except (ProviderError, ConfigError) as exc:
+        st.error(str(exc))
+        st.stop()
+
+
+def run_judge_mode(provider, settings) -> None:
+    """Fluxo RAG do Juiz."""
+    st.title("⚖️ Juiz Azorius")
+    st.caption(
+        "Juiz de Magic: The Gathering (Nível 3) com RAG sobre as Comprehensive Rules. "
+        "Cite cartas pelo nome naturalmente — ou entre [[colchetes duplos]] para forçar."
+    )
+
+    try:
         collection = get_collection(settings.llm_provider, settings.api_key)
     except (VectorDBError, ProviderError, ConfigError) as exc:
         st.error(str(exc))
         st.stop()
 
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
-    if "card_history" not in st.session_state:
-        st.session_state.card_history = []
-
-    for message in st.session_state.messages:
+    for message in st.session_state.judge_messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
@@ -224,17 +257,12 @@ def main() -> None:
         render_cards_sidebar(st.session_state.card_history)
         return
 
-    # Histórico ANTES da pergunta atual: dá memória à extração e ao ruling.
-    history = list(st.session_state.messages)
+    history = list(st.session_state.judge_messages)
 
-    st.session_state.messages.append({"role": "user", "content": question})
+    st.session_state.judge_messages.append({"role": "user", "content": question})
     with st.chat_message("user"):
         st.markdown(question)
 
-    # Passo A/B — cartas citadas na pergunta -> dados oficiais do Scryfall.
-    # Extração híbrida: [[colchetes]] são determinísticos e têm prioridade;
-    # sem eles, o LLM identifica nomes em escrita natural (inclusive PT->EN),
-    # usando o histórico para resolver referências a cartas já discutidas.
     card_names = extract_card_names(question)
     if not card_names:
         with st.spinner("Identificando cartas citadas..."):
@@ -243,15 +271,10 @@ def main() -> None:
     cards: list[dict] = []
     missing_cards: list[str] = []
     with st.spinner("Consultando cartas no Scryfall..."):
-        # `question` ancora a resolução: evita que o LLM troque uma carta
-        # por outra só parecida (ex.: Hazezon Tamar ≠ Hazezon, Shaper of Sand).
         cards, missing_cards = resolve_cards(
             card_names, context=question, warn_missing=True, skip_known=False
         )
 
-    # Passo C — RAG: reescreve a pergunta como consulta técnica em inglês
-    # (idioma das regras), usando histórico e oracle text para dar contexto a
-    # follow-ups curtos; depois busca as regras mais similares.
     try:
         with st.spinner("Buscando nas Comprehensive Rules..."):
             search_query = rewrite_rules_query(provider, question, history, cards)
@@ -264,15 +287,11 @@ def main() -> None:
         render_cards_sidebar(st.session_state.card_history)
         return
 
-    # Passo D/E — injeção de contexto no LLM e streaming da resposta.
     with st.chat_message("assistant"):
         try:
             stream = generate_judge_ruling(
                 provider, cards, rules_context, question, history, missing_cards
             )
-            # O modelo de raciocínio fica em silêncio (às vezes por mais de um
-            # minuto) antes do primeiro token; o spinner cobre essa espera e
-            # some assim que o streaming de fato começa.
             with st.spinner("O Juiz está deliberando... pode demorar um pouco"):
                 first_chunk = next(stream, "")
             answer = st.write_stream(itertools.chain([first_chunk], stream))
@@ -282,15 +301,62 @@ def main() -> None:
             render_cards_sidebar(st.session_state.card_history)
             return
 
-    st.session_state.messages.append({"role": "assistant", "content": answer})
+    st.session_state.judge_messages.append({"role": "assistant", "content": answer})
 
-    # Passo F — histórico: foco da pergunta, depois cartas da resposta na
-    # ordem em que aparecem no texto (top N → menções honrosas).
     with st.spinner("Atualizando histórico de cartas..."):
         answer_names = extract_card_names_from_answer(provider, answer)
         answer_cards, _ = resolve_cards(answer_names, context=answer)
         update_card_history(cards + answer_cards)
     render_cards_sidebar(st.session_state.card_history)
+
+
+def run_deckbuilder_mode(provider) -> None:
+    """Chat agentic do Deckbuilder (micro-passos 0–5 + tools de preço)."""
+    st.title("🛠️ Deckbuilder Azorius")
+    st.caption(
+        "Oficina de Commander por pacotes: briefing, wincons, motor, sinergia, "
+        "interação e mana — um passo por vez. Preços via Scryfall quando houver budget."
+    )
+
+    for message in st.session_state.deckbuilder_messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+
+    user_input = st.chat_input(
+        "Ex.: Quero um Niv-Mizzet, Parun Bracket 3, orçamento US$ 150"
+    )
+    if not user_input:
+        return
+
+    history_before = list(st.session_state.deckbuilder_messages)
+    st.session_state.deckbuilder_messages.append(
+        {"role": "user", "content": user_input}
+    )
+    with st.chat_message("user"):
+        st.markdown(user_input)
+
+    with st.chat_message("assistant"):
+        try:
+            with st.spinner("Montando o próximo pacote..."):
+                answer = chat_deckbuilder(provider, user_input, history_before)
+            st.markdown(answer)
+        except ProviderError as exc:
+            st.error(str(exc))
+            return
+
+    st.session_state.deckbuilder_messages.append(
+        {"role": "assistant", "content": answer}
+    )
+
+
+def main() -> None:
+    mode = render_mode_and_provider_sidebar()
+    provider, settings = resolve_provider()
+
+    if mode == MODE_DECKBUILDER:
+        run_deckbuilder_mode(provider)
+    else:
+        run_judge_mode(provider, settings)
 
 
 main()

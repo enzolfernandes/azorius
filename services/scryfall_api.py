@@ -370,3 +370,107 @@ def fetch_card_data(card_name: str, question: str | None = None) -> dict | None:
         "image_url": _extract_image_url(card),
         "rulings": _fetch_rulings(rulings_uri) if rulings_uri else [],
     }
+
+
+def _parse_usd(card: dict) -> float | None:
+    """Extrai o preço USD do payload Scryfall; None se indisponível."""
+    raw = (card.get("prices") or {}).get("usd")
+    if raw is None or raw == "":
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_pool_card(card: dict) -> dict:
+    """Normaliza uma carta Scryfall para o pipeline do Deckbuilder."""
+    return {
+        "name": card.get("name", ""),
+        "color_identity": list(card.get("color_identity") or []),
+        "cmc": float(card.get("cmc") or 0),
+        "prices": {"usd": _parse_usd(card)},
+        "type_line": card.get("type_line", ""),
+        "oracle_text": _extract_oracle_text(card),
+        "image_url": _extract_image_url(card),
+    }
+
+
+def fetch_commander(name: str) -> dict | None:
+    """Resolve um comandante por nome (fuzzy/multilíngue) para o Deckbuilder.
+
+    Retorna None se a carta não for encontrada. Campos:
+        name, color_identity, cmc, type_line, image_url, oracle_text
+    """
+    card = _lookup_card_raw(name)
+    if card is None:
+        return None
+    return {
+        "name": card.get("name", name),
+        "color_identity": list(card.get("color_identity") or []),
+        "cmc": float(card.get("cmc") or 0),
+        "type_line": card.get("type_line", ""),
+        "image_url": _extract_image_url(card),
+        "oracle_text": _extract_oracle_text(card),
+    }
+
+
+def fetch_card_market_info(name: str) -> dict | None:
+    """Resolve nome + mana_cost + preço USD para tools do Deckbuilder agentic."""
+    card = _lookup_card_raw(name)
+    if card is None:
+        return None
+    return {
+        "name": card.get("name", name),
+        "mana_cost": card.get("mana_cost", "") or "",
+        "cmc": float(card.get("cmc") or 0),
+        "usd": _parse_usd(card),
+        "type_line": card.get("type_line", ""),
+    }
+
+
+def fetch_commander_card_pool(
+    commander_name: str, *, max_cards: int = 400
+) -> list[dict]:
+    """Busca candidatos legais em Commander para o comandante informado.
+
+    Usa a sintaxe Scryfall `commander:"Nome"` (identidade legal, exclusão do
+    próprio comandante na prática via dedupe). Pagina até `max_cards`.
+    Cada item: name, color_identity, cmc, prices.usd, type_line, oracle_text.
+    """
+    if max_cards <= 0:
+        return []
+
+    # unique=cards evita reprints; order=edhrec prioriza staples do formato.
+    query = f'commander:"{commander_name}" -is:funny game:paper'
+    response = _get(
+        SCRYFALL_SEARCH_URL,
+        {"q": query, "unique": "cards", "order": "edhrec"},
+    )
+    if response is None or response.status_code != 200:
+        return []
+
+    pool: list[dict] = []
+    seen_names: set[str] = set()
+    commander_key = commander_name.strip().lower()
+
+    while response is not None and response.status_code == 200:
+        try:
+            payload = response.json()
+        except ValueError:
+            break
+        for raw in payload.get("data", []):
+            normalized = _normalize_pool_card(raw)
+            key = normalized["name"].strip().lower()
+            if not key or key in seen_names or key == commander_key:
+                continue
+            seen_names.add(key)
+            pool.append(normalized)
+            if len(pool) >= max_cards:
+                return pool
+
+        if not payload.get("has_more") or not payload.get("next_page"):
+            break
+        response = _get(payload["next_page"])
+
+    return pool

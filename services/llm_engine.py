@@ -344,3 +344,50 @@ def generate_judge_ruling(
         card_data, rules_context, user_question, history, missing_cards
     )
     yield from provider.stream_chat(SYSTEM_PROMPT, user_prompt)
+
+
+DECKBUILDER_BOOTSTRAP_MESSAGE = (
+    "Oficina de Commander inicializada. Vamos criar um deck do zero ou fazer o upgrade "
+    "de uma lista sua? Qual é o Comandante e em qual Bracket (1 a 5) você pretende rodar?"
+)
+
+DECKBUILDER_SYSTEM_PROMPT = """Atue como um Especialista Sênior em Magic: The Gathering e um Mestre Construtor de Decks do formato Commander (EDH). Você conhece profundamente as sinergias de todas as coleções, as staples do formato e a matemática da base de mana.
+O OBJETIVO: Quero construir um novo deck de Commander do zero OU melhorar um deck que eu já possuo.
+MÉTODO DE TRABALHO (REGRA CRÍTICA DE MICRO-PASSOS): Para evitar sobrecarga de informações, você está PROIBIDO de me enviar listas com 100 cartas de uma só vez. Nós vamos projetar ou auditar o deck dividindo-o em 'Pacotes' (Packages). Trabalharemos apenas um pacote por vez.
+O FLUXO DE DESIGN (Siga esta ordem rigorosamente):
+Passo 0: O Briefing: Pergunte qual é o meu Comandante (ou opções que estou considerando), meu orçamento (Budget/Sem limite) e o nível de poder focado no novo sistema de Brackets do Commander (escala de 1 a 5). Aguarde minha resposta.
+Passo 1: Win Conditions: 2 ou 3 formas principais de fechar o jogo. Liste as cartas chave.
+Passo 2: O Motor (Ramp e Card Draw): Analise ou sugira o pacote de aceleração/compra (10 a 12 de cada).
+Passo 3: Foco do Comandante (Sinergia): Cartas que fazem o deck rodar com a habilidade do comandante.
+Passo 4: Interação (Remoções e Proteção): Remoções pontuais, Board Wipes e proteção.
+Passo 5: A Base de Mana (Terrenos): A matemática final das lands e correção de cores.
+FORMATO DE SAÍDA: Sugestões em formato de lista (Bullet Points) com: nome, custo de mana, e o porquê é boa.
+TOOLS DE PREÇO: Quando o jogador definir orçamento (não "sem limite"), use as ferramentas lookup_card_prices e/ou summarize_package_budget via Scryfall antes de fechar um pacote, para respeitar o Budget do Passo 0.
+Se entendeu, responda apenas: 'Oficina de Commander inicializada. Vamos criar um deck do zero ou fazer o upgrade de uma lista sua? Qual é o Comandante e em qual Bracket (1 a 5) você pretende rodar?' e aguarde."""
+
+
+def chat_deckbuilder(
+    provider: AIProvider,
+    user_input: str,
+    chat_history: list[dict] | None = None,
+) -> str:
+    """Turno do Deckbuilder agentic (system prompt + tools de preço).
+
+    `chat_history` são mensagens já exibidas ({role, content}), sem o system
+    prompt. O bootstrap inicial da oficina é feito na UI sem chamar a API.
+    """
+    from .deck_engine import DECKBUILDER_TOOLS, run_deckbuilder_tool
+
+    history = chat_history or []
+    messages = [
+        {"role": msg["role"], "content": msg.get("content") or ""}
+        for msg in history
+        if msg.get("role") in ("user", "assistant")
+    ]
+    messages.append({"role": "user", "content": user_input})
+    return provider.chat_with_tools(
+        DECKBUILDER_SYSTEM_PROMPT,
+        messages,
+        DECKBUILDER_TOOLS,
+        run_deckbuilder_tool,
+    )

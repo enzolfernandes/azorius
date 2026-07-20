@@ -1,9 +1,12 @@
-# Azorius — Juiz de Magic: The Gathering (Nível 3)
+# Azorius — Juiz e Deckbuilder de Magic: The Gathering
 
-Protótipo local de um juiz de regras de MTG com arquitetura RAG (Retrieval-Augmented Generation):
-as Regras Abrangentes oficiais são indexadas em um banco vetorial (ChromaDB), os dados exatos das
-cartas vêm da API do Scryfall e a resposta final é gerada por um LLM (Gemini, OpenAI ou Claude)
-usando apenas o contexto recuperado — sem alucinações.
+Protótipo local com dois modos:
+
+- **Modo Juiz** — RAG (Retrieval-Augmented Generation) sobre as Comprehensive Rules:
+  cartas via Scryfall, resposta por LLM (Gemini, OpenAI ou Claude) com contexto recuperado.
+- **Modo Deckbuilder** — chat agentic em micro-passos (briefing → wincons → motor →
+  sinergia → interação → mana). O LLM sugere pacotes; tools consultam preços no Scryfall
+  para respeitar o budget conversado.
 
 ## Arquitetura
 
@@ -12,9 +15,10 @@ usando apenas o contexto recuperado — sem alucinações.
   - `config.py` — validação de provedor/chave (UI ou `.env`).
   - `providers.py` — factory de provedores (LLM + embeddings), ponto único de injeção de dependência.
   - `rules_setup.py` — download automático das Comprehensive Rules quando o arquivo falta.
-  - `scryfall_api.py` — consulta de cartas na API do Scryfall.
+  - `scryfall_api.py` — consulta de cartas e pool Commander na API do Scryfall.
+  - `deck_engine.py` — tools de preço/budget (Scryfall) e utilitários do Deckbuilder.
   - `vector_db.py` — chunking das regras e persistência/consulta no ChromaDB.
-  - `llm_engine.py` — montagem do prompt de juiz e geração em streaming.
+  - `llm_engine.py` — prompt do juiz, chat agentic do Deckbuilder e streaming.
 - `scripts/setup_rules.py` — download automático do arquivo oficial de Regras Abrangentes (.txt).
 - `data/` — regras baixadas e banco vetorial persistente (gerados localmente).
 
@@ -52,6 +56,18 @@ usando apenas o contexto recuperado — sem alucinações.
    ```
 
 5. Na barra lateral, escolha o provedor (Gemini, OpenAI ou Claude), cole a chave de API e clique em **Aplicar**.
+   Use o seletor **Modo Juiz** / **Modo Deckbuilder** para alternar as funções.
+
+## Modo Deckbuilder
+
+1. Selecione **Modo Deckbuilder** na sidebar — o chat reinicia com
+   *“Oficina de Commander inicializada…”* (system prompt oculto).
+2. Informe comandante, orçamento (ou sem limite) e Bracket (1–5).
+3. Avance pacote a pacote (win conditions → ramp/draw → sinergia → interação → lands).
+
+O assistente **não** envia 100 cartas de uma vez. Quando houver budget, ele pode chamar
+tools (`lookup_card_prices` / `summarize_package_budget`) contra o Scryfall antes de
+fechar um pacote.
 
 ## Compartilhar com pessoas próximas
 
