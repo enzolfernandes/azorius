@@ -426,7 +426,19 @@ def fetch_card_market_info(name: str) -> dict | None:
         "cmc": float(card.get("cmc") or 0),
         "usd": _parse_usd(card),
         "type_line": card.get("type_line", ""),
+        "oracle_text": _extract_oracle_text(card),
     }
+
+
+def fetch_card_image_url(name: str) -> str | None:
+    """Resolve só a URL da imagem Scryfall (preview no chat)."""
+    query = (name or "").strip()
+    if not query:
+        return None
+    card = _lookup_card_raw(query)
+    if card is None:
+        return None
+    return _extract_image_url(card)
 
 
 def fetch_commander_card_pool(

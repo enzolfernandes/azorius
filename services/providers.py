@@ -312,9 +312,12 @@ class OpenAIProvider(AIProvider):
                     "messages": thread,
                     "tools": openai_tools,
                 }
-                # gpt-5+ usa reasoning_effort; temperature pode falhar.
+                # gpt-5.5: function tools no /v1/chat/completions exigem
+                # reasoning_effort="none" (high/medium quebram com 400).
                 if self.RULING_MODEL.startswith("gpt-5"):
-                    kwargs["reasoning_effort"] = self.RULING_REASONING_EFFORT
+                    kwargs["reasoning_effort"] = (
+                        "none" if openai_tools else self.RULING_REASONING_EFFORT
+                    )
                 response = self._client.chat.completions.create(**kwargs)
                 message = response.choices[0].message
                 tool_calls = message.tool_calls or []

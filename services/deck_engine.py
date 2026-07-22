@@ -11,7 +11,11 @@ import json
 from collections import Counter
 from typing import Any
 
-from .scryfall_api import fetch_card_market_info
+from .scryfall_api import (
+    fetch_card_market_info,
+    fetch_commander,
+    fetch_commander_card_pool,
+)
 
 DECK_SIZE = 99
 
@@ -245,6 +249,61 @@ def enforce_budget_and_curve(
     }
 
 
+_BASIC_LAND_NAMES = frozenset(
+    {"Plains", "Island", "Swamp", "Mountain", "Forest", "Wastes"}
+)
+
+
+def consolidate_card_counts(cards: list[dict]) -> list[tuple[str, int]]:
+    """Agrupa cartas por nome com Counter; retorna [(nome, quantidade), ...]."""
+    counts: Counter[str] = Counter(
+        name
+        for card in cards
+        if (name := (card.get("name") or "").strip())
+    )
+    return sorted(counts.items(), key=lambda item: item[0].lower())
+
+
+def _is_basic_land(card: dict) -> bool:
+    name = (card.get("name") or "").strip()
+    if name in _BASIC_LAND_NAMES:
+        return True
+    return "basic land" in (card.get("type_line") or "").lower()
+
+
+def format_decklist_export(
+    cards: list[dict],
+    *,
+    commander_name: str | None = None,
+) -> str:
+    """Lista crua estilo Moxfield/Arena: '# Categoria' e linhas 'Nx Nome'.
+
+    Terrenos básicos e demais cartas são agrupados via Counter — nunca uma
+    linha por cópia de básico.
+    """
+    lines: list[str] = []
+    if commander_name and commander_name.strip():
+        lines.append("# Comandante")
+        lines.append(f"1x {commander_name.strip()}")
+        lines.append("")
+
+    basics = [c for c in cards if _is_basic_land(c)]
+    others = [c for c in cards if not _is_basic_land(c)]
+
+    if others:
+        lines.append("# Spells")
+        for name, qty in consolidate_card_counts(others):
+            lines.append(f"{qty}x {name}")
+        lines.append("")
+
+    if basics:
+        lines.append("# Terrenos")
+        for name, qty in consolidate_card_counts(basics):
+            lines.append(f"{qty}x {name}")
+
+    return ("\n".join(lines).rstrip() + "\n") if lines else ""
+
+
 def generate_decklist_prompt(
     commander_name: str,
     optimized_pool: list[dict] | dict,
@@ -253,7 +312,8 @@ def generate_decklist_prompt(
     """Monta o payload estruturado para o LLM apresentador (sem recalcular).
 
     `optimized_pool` aceita a lista de cartas ou o dict retornado por
-    `enforce_budget_and_curve` (com metadados).
+    `enforce_budget_and_curve` (com metadados). A lista embutida já vem
+    agrupada (Counter) no formato Nx Nome.
     """
     if isinstance(optimized_pool, dict) and "deck" in optimized_pool:
         deck = list(optimized_pool.get("deck") or [])
@@ -273,15 +333,9 @@ def generate_decklist_prompt(
         shortfall = max(0, DECK_SIZE - len(deck))
         target = {}
 
-    lines = []
-    for card in deck:
-        price = _card_price(card)
-        price_s = "N/A" if price == float("inf") else f"${price:.2f}"
-        lines.append(
-            f"- {card.get('name', '?')} | CMC {card.get('cmc', 0)} | {price_s} | "
-            f"{card.get('type_line', '')}"
-        )
-    deck_block = "\n".join(lines) if lines else "(lista vazia)"
+    deck_block = format_decklist_export(deck, commander_name=commander_name).rstrip()
+    if not deck_block:
+        deck_block = "(lista vazia)"
 
     curve_lines = ", ".join(f"CMC{b}={curve.get(b, 0)}" for b in range(8))
     target_lines = (
@@ -300,16 +354,14 @@ Shortfall antes de básicos: {shortfall}
 ### Pedido do jogador
 {request}
 
-### Lista (nome | CMC | preço | type_line)
+### Lista (formato importação — já agrupada com Counter)
 {deck_block}
 
 ## INSTRUÇÕES AO APRESENTADOR
-1. Apresente esta lista em Português do Brasil de forma didática.
-2. NÃO adicione, remova, substitua nem reordene cartas.
+1. Reproduza a lista acima SEM alterar nomes, quantidades nem ordem das categorias.
+2. Mantenha o formato "Nx Nome" e cabeçalhos "# Categoria"; NÃO adicione prosa nas linhas.
 3. NÃO recalcule orçamento, curva de mana nem identidade de cor — os números acima são finais.
-4. Explique brevemente o racional geral (como a lista atende o pedido) sem inventar cartas.
-5. Comece com "Planinauta, " e organize por categorias úteis (terrenos, ramp, draw, interação, etc.)
-   usando APENAS nomes que aparecem na lista.
+4. Fora do bloco da lista, uma frase curta de abertura é opcional; a lista em si deve ser crua.
 """
 
 
@@ -321,8 +373,9 @@ DECKBUILDER_TOOLS: list[dict[str, Any]] = [
     {
         "name": "lookup_card_prices",
         "description": (
-            "Consulta preços USD e custo de mana de cartas no Scryfall. "
-            "Use antes de sugerir um pacote quando o jogador definiu orçamento."
+            "Consulta preços de cartas (preferência LigaMagic em BRL; fallback "
+            "Scryfall USD) e custo de mana. Use antes de sugerir um pacote quando "
+            "o jogador definiu orçamento."
         ),
         "parameters": {
             "type": "object",
@@ -339,8 +392,8 @@ DECKBUILDER_TOOLS: list[dict[str, Any]] = [
     {
         "name": "summarize_package_budget",
         "description": (
-            "Soma o preço USD de um pacote de cartas e compara com o orçamento "
-            "máximo conversado no Passo 0. Use para validar se o pacote cabe no budget."
+            "Soma o preço de um pacote (BRL via LigaMagic quando possível, senão "
+            "USD Scryfall) e compara com o orçamento máximo do Passo 0."
         ),
         "parameters": {
             "type": "object",
@@ -353,8 +406,8 @@ DECKBUILDER_TOOLS: list[dict[str, Any]] = [
                 "max_budget_usd": {
                     "type": "number",
                     "description": (
-                        "Orçamento máximo em USD. Omita ou use null se o jogador "
-                        "disse sem limite."
+                        "Orçamento máximo na moeda conversada (R$ se LigaMagic; "
+                        "USD se só Scryfall). Omita ou null se sem limite."
                     ),
                 },
             },
@@ -364,8 +417,63 @@ DECKBUILDER_TOOLS: list[dict[str, Any]] = [
 ]
 
 
+def build_autopilot_deck(
+    commander_name: str,
+    bracket: int,
+    max_budget_usd: float,
+    *,
+    pool_size: int = 400,
+) -> dict[str, Any]:
+    """Gera lista Commander completa via motor Python (sem micro-passos LLM)."""
+    name = (commander_name or "").strip()
+    if not name:
+        return {"ok": False, "error": "Informe o nome do comandante."}
+
+    try:
+        bracket_n = int(bracket)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "Bracket inválido (use 1 a 5)."}
+    if bracket_n not in BRACKET_CURVES:
+        return {"ok": False, "error": "Bracket deve ser entre 1 e 5."}
+
+    try:
+        budget = float(max_budget_usd)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "Orçamento inválido."}
+    if budget < 0:
+        return {"ok": False, "error": "Orçamento não pode ser negativo."}
+
+    commander = fetch_commander(name)
+    if commander is None:
+        return {"ok": False, "error": f"Comandante não encontrado no Scryfall: {name}"}
+
+    pool = fetch_commander_card_pool(commander["name"], max_cards=pool_size)
+    legal = enforce_color_identity(commander.get("color_identity") or [], pool)
+    optimized = enforce_budget_and_curve(
+        legal,
+        budget,
+        BRACKET_CURVES[bracket_n],
+        commander_colors=commander.get("color_identity") or [],
+    )
+    export = format_decklist_export(
+        optimized["deck"], commander_name=commander["name"]
+    )
+    return {
+        "ok": True,
+        "commander": commander,
+        "bracket": bracket_n,
+        "max_budget_usd": budget,
+        "optimized": optimized,
+        "export": export,
+        "pool_size": len(pool),
+        "legal_size": len(legal),
+    }
+
+
 def lookup_card_prices(card_names: list[str]) -> list[dict[str, Any]]:
-    """Resolve cada nome no Scryfall e devolve name, mana_cost, usd, found."""
+    """Precifica cartas: LigaMagic BRL primeiro, Scryfall USD como fallback."""
+    from .ligamagic_prices import fetch_ligamagic_brl
+
     results: list[dict[str, Any]] = []
     seen: set[str] = set()
     for raw_name in card_names or []:
@@ -383,17 +491,44 @@ def lookup_card_prices(card_names: list[str]) -> list[dict[str, Any]]:
                     "name": query,
                     "mana_cost": "",
                     "usd": None,
+                    "brl": None,
+                    "price": None,
+                    "currency": None,
+                    "source": None,
                     "found": False,
                 }
             )
             continue
+
+        brl = fetch_ligamagic_brl(info["name"])
+        if brl is not None:
+            results.append(
+                {
+                    "query": query,
+                    "name": info["name"],
+                    "mana_cost": info.get("mana_cost", ""),
+                    "usd": info.get("usd"),
+                    "brl": brl,
+                    "price": brl,
+                    "currency": "BRL",
+                    "source": "ligamagic",
+                    "found": True,
+                }
+            )
+            continue
+
+        usd = info.get("usd")
         results.append(
             {
                 "query": query,
                 "name": info["name"],
                 "mana_cost": info.get("mana_cost", ""),
-                "usd": info.get("usd"),
-                "found": True,
+                "usd": usd,
+                "brl": None,
+                "price": usd,
+                "currency": "USD" if usd is not None else None,
+                "source": "scryfall" if usd is not None else None,
+                "found": usd is not None,
             }
         )
     return results
@@ -402,17 +537,37 @@ def lookup_card_prices(card_names: list[str]) -> list[dict[str, Any]]:
 def summarize_package_budget(
     card_names: list[str], max_budget_usd: float | None = None
 ) -> dict[str, Any]:
-    """Soma USD do pacote e indica se respeita o budget conversado."""
+    """Soma preços do pacote (moeda dominante) e valida orçamento."""
     priced = lookup_card_prices(card_names)
-    total = 0.0
+    total_brl = 0.0
+    total_usd = 0.0
+    n_brl = 0
+    n_usd = 0
     missing: list[str] = []
     priced_cards: list[dict[str, Any]] = []
     for item in priced:
-        if not item["found"] or item["usd"] is None:
+        if not item["found"] or item.get("price") is None:
             missing.append(item["name"])
             continue
-        total += float(item["usd"])
         priced_cards.append(item)
+        if item.get("currency") == "BRL":
+            total_brl += float(item["price"])
+            n_brl += 1
+        else:
+            total_usd += float(item["price"])
+            n_usd += 1
+
+    # Moeda de relatório: BRL se maioria veio do LigaMagic.
+    if n_brl >= n_usd and n_brl > 0:
+        currency = "BRL"
+        total = total_brl
+        # Converte USD residual de forma grosseira só para somar (não misturar na UI).
+        # Preferimos reportar só o que está na moeda principal + aviso.
+        if n_usd:
+            total = total_brl  # ignora USD na soma BRL; listados em missing_fx
+    else:
+        currency = "USD"
+        total = total_usd
 
     budget: float | None
     if max_budget_usd is None:
@@ -428,12 +583,18 @@ def summarize_package_budget(
             within = total <= budget + 1e-9
 
     return {
-        "total_usd": round(total, 2),
+        "total": round(total, 2),
+        "currency": currency,
+        "total_usd": round(total_usd, 2),
+        "total_brl": round(total_brl, 2),
         "max_budget_usd": budget,
+        "max_budget": budget,
         "within_budget": within,
         "missing": missing,
         "cards": priced_cards,
         "card_count_priced": len(priced_cards),
+        "priced_brl": n_brl,
+        "priced_usd": n_usd,
     }
 
 

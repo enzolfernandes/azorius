@@ -4,9 +4,8 @@ Protótipo local com dois modos:
 
 - **Modo Juiz** — RAG (Retrieval-Augmented Generation) sobre as Comprehensive Rules:
   cartas via Scryfall, resposta por LLM (Gemini, OpenAI ou Claude) com contexto recuperado.
-- **Modo Deckbuilder** — chat agentic em micro-passos (briefing → wincons → motor →
-  sinergia → interação → mana). O LLM sugere pacotes; tools consultam preços no Scryfall
-  para respeitar o budget conversado.
+- **Modo Deckbuilder** — chat agentic em micro-passos, geração rápida (motor Python) ou
+  melhoria de lista colada. Tools de preço preferem LigaMagic (R$) com fallback Scryfall USD.
 
 ## Arquitetura
 
@@ -16,7 +15,11 @@ Protótipo local com dois modos:
   - `providers.py` — factory de provedores (LLM + embeddings), ponto único de injeção de dependência.
   - `rules_setup.py` — download automático das Comprehensive Rules quando o arquivo falta.
   - `scryfall_api.py` — consulta de cartas e pool Commander na API do Scryfall.
-  - `deck_engine.py` — tools de preço/budget (Scryfall) e utilitários do Deckbuilder.
+  - `deck_engine.py` — motor autopilot, tools de preço/budget e export de lista.
+  - `decklist_parse.py` / `deck_upgrade.py` — parse de listas e auditoria de upgrade.
+  - `ligamagic_prices.py` — preços BRL (cache em disco) com degradação elegante.
+  - `mana_symbols.py` — `{C}`, `{W/U}`, `{T}` etc. → ícones SVG do Scryfall na UI.
+  - `conversations.py` — persistência local de chats (Juiz / Deckbuilder).
   - `vector_db.py` — chunking das regras e persistência/consulta no ChromaDB.
   - `llm_engine.py` — prompt do juiz, chat agentic do Deckbuilder e streaming.
 - `scripts/setup_rules.py` — download automático do arquivo oficial de Regras Abrangentes (.txt).
@@ -30,7 +33,9 @@ Protótipo local com dois modos:
    pip install -r requirements.txt
    ```
 
-2. (Opcional) Preencha o `.env` para uso solo — a sidebar da app também aceita provedor e chave:
+2. (Opcional) Preencha o `.env` para uso solo — ou use **Configurações** na sidebar:
+   ao clicar em **Aplicar**, provedor e chave ficam em `data/ui_settings.json` e são
+   lembrados na próxima abertura (prioridade sobre o `.env`):
 
    ```
    LLM_PROVIDER=gemini        # ou "openai" ou "claude"
@@ -55,19 +60,21 @@ Protótipo local com dois modos:
    streamlit run app.py
    ```
 
-5. Na barra lateral, escolha o provedor (Gemini, OpenAI ou Claude), cole a chave de API e clique em **Aplicar**.
-   Use o seletor **Modo Juiz** / **Modo Deckbuilder** para alternar as funções.
+5. Na tela inicial, escolha o provedor (Gemini, OpenAI ou Claude), cole a chave e clique em **Iniciar**.
+   Só então o Juiz ou o Deckbuilder sobem. Depois, alterne os modos na sidebar; **⚙️ Configurações** reabre o popup.
 
 ## Modo Deckbuilder
 
-1. Selecione **Modo Deckbuilder** na sidebar — o chat reinicia com
-   *“Oficina de Commander inicializada…”* (system prompt oculto).
-2. Informe comandante, orçamento (ou sem limite) e Bracket (1–5).
-3. Avance pacote a pacote (win conditions → ramp/draw → sinergia → interação → lands).
+1. Selecione **Modo Deckbuilder** — escolha o fluxo: **Criar do zero**, **Melhorar lista** ou **Geração rápida**.
+2. **Criar do zero**: briefing → pacotes um a um (wincons → ramp/draw → sinergia → interação → lands).
+3. **Melhorar lista**: cole `Nx Nome`, audite gaps e peça upgrades no chat.
+4. **Geração rápida**: formulário (comandante + bracket + budget) → lista do motor Python.
 
-O assistente **não** envia 100 cartas de uma vez. Quando houver budget, ele pode chamar
-tools (`lookup_card_prices` / `summarize_package_budget`) contra o Scryfall antes de
-fechar um pacote.
+Listas com `# Categoria` aparecem em expanders; no Juiz, passe o mouse no nome da carta para o preview.
+No Deckbuilder, a sidebar **Lista do deck** acumula os pacotes sugeridos (com download).
+Conversas ficam em `data/conversations/`. Botão **↻ Repetir / próxima** reenvia a última mensagem.
+
+Com budget, as tools preferem LigaMagic (R$); se a busca falhar, usam Scryfall USD.
 
 ## Compartilhar com pessoas próximas
 
@@ -130,7 +137,7 @@ Recomendado para demo: deixar a sidebar e cada visitante colar a **própria** ch
 #### Depois do deploy
 
 1. Abra a URL `https://….streamlit.app`.
-2. Na sidebar, escolha o provedor, cole a chave e clique em **Aplicar**.
+2. Em **Configurações** (popup na sidebar), escolha o provedor, cole a chave e clique em **Aplicar**.
 3. A **primeira** visita por provedor baixa/ingere o índice Chroma — pode levar vários minutos; não feche a aba.
 4. Push na branch redesploya o app.
 

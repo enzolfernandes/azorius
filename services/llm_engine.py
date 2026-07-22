@@ -361,15 +361,54 @@ Passo 2: O Motor (Ramp e Card Draw): Analise ou sugira o pacote de aceleração/
 Passo 3: Foco do Comandante (Sinergia): Cartas que fazem o deck rodar com a habilidade do comandante.
 Passo 4: Interação (Remoções e Proteção): Remoções pontuais, Board Wipes e proteção.
 Passo 5: A Base de Mana (Terrenos): A matemática final das lands e correção de cores.
-FORMATO DE SAÍDA: Sugestões em formato de lista (Bullet Points) com: nome, custo de mana, e o porquê é boa.
-TOOLS DE PREÇO: Quando o jogador definir orçamento (não "sem limite"), use as ferramentas lookup_card_prices e/ou summarize_package_budget via Scryfall antes de fechar um pacote, para respeitar o Budget do Passo 0.
+TOOLS DE PREÇO: Quando o jogador definir orçamento (não "sem limite"), use as ferramentas lookup_card_prices e/ou summarize_package_budget antes de fechar um pacote. Os preços preferem LigaMagic em R$ (BRL); se falhar, há fallback Scryfall em USD. Fale em R$ quando a tool retornar currency=BRL; use USD só no fallback.
+
+REGRA DE SAÍDA (OUTPUT FORMAT RULE) — OBRIGATÓRIA em qualquer lista de cartas:
+1. PADRÃO DE SINTAXE: Toda carta sugerida deve ser impressa ESTRITAMENTE no formato \
+"[Quantidade]x [Nome da Carta] [Tags ou Edição opcional]". \
+Exemplos corretos: "2x Sol Ring" / "1x Path to Exile (cmm) [Removal]" / "14x Mountain". \
+NÃO use bullets com hífen para cartas; NÃO coloque custo de mana nem "porquê" na mesma linha da carta \
+(tags curtas entre colchetes são o único comentário permitido na linha).
+2. AGRUPAMENTO ABSOLUTO: NUNCA repita o nome de uma carta em linhas separadas. \
+Se o deck usar 14 terrenos básicos do mesmo tipo, agrupe: "14x Swamp" (nunca 14 linhas "1x Swamp").
+3. CABEÇALHOS (HEADERS): Use '#' no início da linha para separar categorias, sem hifens e sem \
+contagem ao lado do título. Exemplos: "# Comandante" / "# Criaturas" / "# Remoções" / "# Terrenos".
+4. PROIBIÇÃO DE TEXTO LIVRE NA LISTA: Na decklist final (e em qualquer bloco de lista de cartas), \
+é TERMINANTEMENTE PROIBIDO adicionar descrições explicativas nas linhas das cartas, observações \
+do tipo "Observação: aqui são...", floreios, ou notas sobre o que é ou não do deck principal. \
+A lista deve ser crua, no estilo de importação do MTG Arena / Moxfield. \
+Prosa curta de discussão (fora dos blocos de lista) só é permitida nos Passos 1–4; a lista em si \
+permanece no formato acima.
+5. EXEMPLO DE BLOCO VÁLIDO:
+# Terrenos
+14x Mountain
+1x Command Tower
+1x Reliquary Tower
+
 Se entendeu, responda apenas: 'Oficina de Commander inicializada. Vamos criar um deck do zero ou fazer o upgrade de uma lista sua? Qual é o Comandante e em qual Bracket (1 a 5) você pretende rodar?' e aguarde."""
+
+
+DECKBUILDER_UPGRADE_SYSTEM_PROMPT = """Atue como um Especialista Sênior em Magic: The Gathering focado em UPGRADE de listas Commander existentes.
+O jogador colou (ou colará) uma decklist. Você NÃO monta um deck do zero: audita gaps e sugere cortes/entradas por pacote.
+MÉTODO: Trabalhe um pacote por vez (ramp/draw, sinergia, interação, lands). Use o briefing de auditoria Python quando fornecido — trate números e gaps como fatos.
+TOOLS DE PREÇO: Com orçamento, use lookup_card_prices / summarize_package_budget. Prefira falar em R$ quando currency=BRL (LigaMagic); USD só no fallback Scryfall.
+
+REGRA DE SAÍDA (igual ao Deckbuilder):
+1. Cartas no formato "Nx Nome" (tags opcionais entre colchetes).
+2. Agrupe cópias: "14x Swamp", nunca 14 linhas.
+3. Cabeçalhos "# Categoria".
+4. Lista crua sem prosa nas linhas de carta.
+5. Prosa curta só fora dos blocos de lista.
+
+Comece pedindo a lista colada (se ainda não veio) + comandante/bracket/budget se faltarem."""
 
 
 def chat_deckbuilder(
     provider: AIProvider,
     user_input: str,
     chat_history: list[dict] | None = None,
+    *,
+    system_prompt: str | None = None,
 ) -> str:
     """Turno do Deckbuilder agentic (system prompt + tools de preço).
 
@@ -386,8 +425,52 @@ def chat_deckbuilder(
     ]
     messages.append({"role": "user", "content": user_input})
     return provider.chat_with_tools(
-        DECKBUILDER_SYSTEM_PROMPT,
+        system_prompt or DECKBUILDER_SYSTEM_PROMPT,
         messages,
         DECKBUILDER_TOOLS,
         run_deckbuilder_tool,
     )
+
+
+def chat_deckbuilder_upgrade(
+    provider: AIProvider,
+    user_input: str,
+    chat_history: list[dict] | None = None,
+) -> str:
+    """Turno dedicado ao modo melhoria de lista."""
+    return chat_deckbuilder(
+        provider,
+        user_input,
+        chat_history,
+        system_prompt=DECKBUILDER_UPGRADE_SYSTEM_PROMPT,
+    )
+
+
+def narrate_autopilot_deck(
+    provider: AIProvider,
+    export_list: str,
+    *,
+    commander_name: str,
+    bracket: int,
+    total_price_usd: float,
+) -> str:
+    """Uma frase curta de apresentação; a lista oficial já veio do Python."""
+    system = (
+        "Você apresenta decks Commander. Receberá uma lista OFICIAL gerada em Python. "
+        "Responda com UMA ou DUAS frases de abertura em português e, em seguida, "
+        "reproduza a lista EXATAMENTE como recebida (mesmos nomes, quantidades e headers). "
+        "Não altere a lista."
+    )
+    user = (
+        f"Comandante: {commander_name}\n"
+        f"Bracket: {bracket}\n"
+        f"Orçamento estimado (USD Scryfall do motor): ${total_price_usd}\n\n"
+        f"{export_list}"
+    )
+    try:
+        return provider.quick_chat(system, user)
+    except ProviderError:
+        return (
+            f"Deck gerado para **{commander_name}** (Bracket {bracket}).\n\n"
+            f"{export_list}"
+        )
