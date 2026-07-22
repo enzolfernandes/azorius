@@ -7,7 +7,7 @@ Backlog e status. Itens `[x]` já estão no código.
 - [x] **Lista em blocos na montagem** — `# Header` + `Nx Nome` → `st.expander` (`services/decklist_parse.py`).
 - [x] **Geração de deck rápida** — autopilot via `build_autopilot_deck` + frase opcional do LLM.
 - [x] **Modo de melhoria de deck** — colar lista → gaps (`deck_upgrade.py`) → prompt dedicado.
-- [x] **Preços via LigaMagic** — `ligamagic_prices.py` (BRL) com fallback Scryfall USD nas tools.
+- [x] **Preços via LigaMagic** — `ligamagic_prices.py` (BRL) em todos os modos do Deckbuilder; sem fallback USD no orçamento (mercado Brasil primeiro).
 
 ## UX / interface
 

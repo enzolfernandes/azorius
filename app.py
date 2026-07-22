@@ -20,6 +20,7 @@ from services.config import (
     api_key_from_env,
     load_ui_defaults,
     persisted_api_key,
+    resolve_brl_price,
     save_ui_settings,
     settings_from_values,
 )
@@ -34,7 +35,10 @@ from services.conversations import (
     title_from_messages,
 )
 from services.card_preview import (
+    deck_rows_html,
+    estimate_deck_list_height,
     estimate_html_height,
+    format_brl_label,
     linkify_known_cards,
     strip_hover_attrs,
     wrap_preview_document,
@@ -50,7 +54,7 @@ from services.deck_assembly import (
 from services.deck_engine import build_autopilot_deck
 from services.deck_upgrade import build_upgrade_brief
 from services.decklist_parse import parse_decklist_text
-from services.ligamagic_prices import clear_last_warning, get_last_warning
+from services.ligamagic_prices import clear_last_warning, fetch_ligamagic_brl, get_last_warning
 from services.mana_symbols import (
     MANA_SYMBOL_CSS,
     has_mana_symbols,
@@ -68,7 +72,7 @@ from services.llm_engine import (
     rewrite_rules_query,
 )
 from services.providers import ProviderError, get_provider
-from services.scryfall_api import fetch_card_data, fetch_card_image_url
+from services.scryfall_api import fetch_card_data, fetch_card_image_url, fetch_card_market_info
 from services.vector_db import VectorDBError, initialize_db, query_rules
 
 # Convenção da comunidade MTG: cartas citadas entre [[colchetes duplos]].
@@ -77,6 +81,9 @@ CARD_MENTION_PATTERN = re.compile(r"\[\[([^\[\]]+)\]\]")
 MODE_JUDGE = "Modo Juiz"
 MODE_DECKBUILDER = "Modo Deckbuilder"
 _LEGACY_MODE_SETTINGS = "Configurações"
+_BASIC_PRICE_ZERO = frozenset(
+    {"Plains", "Island", "Swamp", "Mountain", "Forest", "Wastes"}
+)
 
 st.set_page_config(page_title="Azorius — MTG", page_icon="⚖️", layout="wide")
 
@@ -166,6 +173,76 @@ def cached_card_image_url(name: str) -> str | None:
     return fetch_card_image_url(name)
 
 
+@st.cache_data(ttl=60 * 60 * 12, show_spinner=False)
+def cached_card_brl(name: str) -> float | None:
+    """Preço BRL (LigaMagic preferencial; estimado só se faltar); básicos = 0."""
+    cleaned = (name or "").strip()
+    if not cleaned:
+        return None
+    if cleaned in _BASIC_PRICE_ZERO:
+        return 0.0
+    liga = fetch_ligamagic_brl(cleaned)
+    info = fetch_card_market_info(cleaned)
+    usd = info.get("usd") if info else None
+    brl, _source = resolve_brl_price(ligamagic_brl=liga, usd=usd)
+    return brl
+
+
+def _render_priced_rows(
+    rows: list[dict],
+    *,
+    show_total: bool = False,
+    total_brl: float | None = None,
+    missing_prices: int = 0,
+) -> None:
+    """Lista HTML: nome com hover de arte + preço (iframe compacto)."""
+    body = deck_rows_html(
+        rows,
+        show_total=show_total,
+        total_brl=total_brl,
+        missing_prices=missing_prices,
+    )
+    height = estimate_deck_list_height(len(rows), with_total=show_total)
+    _render_hover_html(
+        body,
+        height=height,
+        enable_hover=True,
+        scrolling=len(rows) > 12,
+    )
+
+
+def _priced_deck_rows(cards: list[tuple[int, str]] | list[dict]) -> tuple[list[dict], float, int]:
+    """Monta linhas {qty,name,image_url,brl,line_brl} + total + qtd sem preço."""
+    rows: list[dict] = []
+    total = 0.0
+    missing = 0
+    for item in cards:
+        if isinstance(item, dict):
+            qty = int(item.get("qty") or 1)
+            name = (item.get("name") or "").strip()
+        else:
+            qty, name = int(item[0]), str(item[1]).strip()
+        if not name or qty < 1:
+            continue
+        unit = cached_card_brl(name)
+        if unit is None:
+            missing += 1
+            line = None
+        else:
+            line = float(unit) * qty
+            total += line
+        rows.append(
+            {
+                "qty": qty,
+                "name": name,
+                "image_url": cached_card_image_url(name),
+                "brl": unit,
+                "line_brl": line,
+            }
+        )
+    return rows, round(total, 2), missing
+
+
 def _render_settings_form(*, submit_label: str) -> bool:
     """Formulário compartilhado (gate + dialog). True se o usuário submeteu."""
     provider_options = list(VALID_PROVIDERS)
@@ -222,7 +299,7 @@ def _render_settings_form(*, submit_label: str) -> bool:
 
 @st.dialog("Configurações")
 def open_settings_dialog() -> None:
-    """Popup para trocar provedor/chave sem sair do modo atual."""
+    """Popup de provedor/chave — mesma aparência na entrada e depois de iniciar."""
     st.caption(
         "Altere provedor e chave. Ao aplicar, Juiz e Deckbuilder usam os novos valores."
     )
@@ -234,25 +311,98 @@ def open_settings_dialog() -> None:
     )
 
 
-def render_setup_gate() -> None:
-    """Tela obrigatória antes de iniciar Juiz ou Deckbuilder."""
-    _ensure_session_defaults()
+def _render_gate_shell() -> None:
+    """Shell visual igual ao app (sidebar + área principal) por trás do dialog."""
+    # Primeira pintura da entrada espelha a captura (Deckbuilder + geração rápida).
+    if not st.session_state.get("_gate_bootstrapped"):
+        st.session_state.app_mode = MODE_DECKBUILDER
+        st.session_state.deck_submode = "Geração rápida"
+        st.session_state._gate_bootstrapped = True
 
     with st.sidebar:
-        st.header("Azorius")
-        st.caption("Configure o provedor para liberar os modos.")
+        st.header("Modo")
+        st.radio(
+            "Escolha o modo",
+            options=[MODE_JUDGE, MODE_DECKBUILDER],
+            key="app_mode",
+            label_visibility="collapsed",
+        )
+        if st.button("⚙️ Configurações", use_container_width=True, key="gate_settings_btn"):
+            st.session_state._open_setup_dialog = True
 
-    st.title("⚙️ Configurações")
-    st.caption(
-        "Escolha o provedor e a chave de API **antes** de iniciar o Juiz ou o Deckbuilder. "
-        "Valores salvos são reaproveitados na próxima visita."
-    )
-    if _render_settings_form(submit_label="Iniciar"):
-        st.rerun()
-    st.info(
-        "Opcional: você também pode pré-preencher via `.env` local. "
-        "Em demo compartilhada, cada pessoa usa a própria chave."
-    )
+        st.header("Conversas")
+        st.button(
+            "Nova conversa",
+            use_container_width=True,
+            disabled=True,
+            key="gate_new_conv",
+        )
+        st.caption("Nenhuma conversa salva ainda.")
+
+        if st.session_state.app_mode == MODE_DECKBUILDER:
+            st.header("Lista do deck")
+            st.caption(
+                "Conforme o assistente sugerir pacotes, a lista aparece aqui "
+                "para download."
+            )
+
+    if st.session_state.app_mode == MODE_DECKBUILDER:
+        st.title("🛠️ Deckbuilder Azorius")
+        st.caption(
+            "Oficina de Commander: chat em micro-passos, geração rápida (motor Python) "
+            "ou melhoria de lista colada. A sidebar acumula a lista do deck. "
+            "Orçamento em R$ via LigaMagic (mercado Brasil)."
+        )
+        if "gate_deck_submode_preview" not in st.session_state:
+            st.session_state.gate_deck_submode_preview = "Geração rápida"
+        st.radio(
+            "Fluxo",
+            options=["Criar do zero", "Melhorar lista", "Geração rápida"],
+            horizontal=True,
+            key="gate_deck_submode_preview",
+            disabled=True,
+        )
+        st.subheader("Geração rápida (autopilot)")
+        st.caption(
+            "Motor Python: comandante → pool → identidade → budget LigaMagic (R$)/curva → lista. "
+            "Sem micro-confirmações dos Passos 1–5. A primeira geração pode demorar "
+            "(consulta de preços)."
+        )
+        with st.form("gate_autopilot_preview"):
+            st.text_input("Comandante", value="Niv-Mizzet, Parun", disabled=True)
+            st.select_slider(
+                "Bracket", options=[1, 2, 3, 4, 5], value=3, disabled=True
+            )
+            st.number_input(
+                "Orçamento máximo (R$ — LigaMagic)",
+                min_value=0.0,
+                value=800.0,
+                step=50.0,
+                disabled=True,
+            )
+            st.form_submit_button("Gerar deck", type="primary", disabled=True)
+        st.info(DECKBUILDER_BOOTSTRAP_MESSAGE)
+    else:
+        st.title("⚖️ Juiz Azorius")
+        st.caption(
+            "Tire dúvidas de regras com base nas Comprehensive Rules. "
+            "Aplique as Configurações para começar."
+        )
+        st.chat_input("Configure o provedor para perguntar…", disabled=True)
+
+
+def render_setup_gate() -> None:
+    """Entrada: shell do app + dialog Configurações (mesma aparência da captura)."""
+    _ensure_session_defaults()
+    if "_open_setup_dialog" not in st.session_state:
+        st.session_state._open_setup_dialog = True
+
+    _render_gate_shell()
+
+    # Mantém o popup aberto até Aplicar (reabre se o usuário fechar sem salvar).
+    if st.session_state._open_setup_dialog or not st.session_state.app_ready:
+        open_settings_dialog()
+        st.session_state._open_setup_dialog = False
 
 
 def render_mode_sidebar() -> str:
@@ -378,7 +528,7 @@ def _ingest_assistant_deck_text(content: str) -> None:
 
 
 def render_assembled_deck_sidebar(assembled: list[dict]) -> None:
-    """Sidebar do Deckbuilder: lista acumulada (no lugar do histórico de cartas)."""
+    """Sidebar do Deckbuilder: lista acumulada com preço e hover de imagem."""
     with st.sidebar:
         st.header("Lista do deck")
         count = total_cards(assembled)
@@ -389,7 +539,12 @@ def render_assembled_deck_sidebar(assembled: list[dict]) -> None:
             )
             return
 
-        st.caption(f"{count} cartas · meta Commander ~99 + comandante")
+        rows, total_brl, missing = _priced_deck_rows(assembled)
+        st.caption(
+            f"{count} cartas · meta Commander ~99 + comandante · "
+            f"Total {format_brl_label(total_brl)}"
+            + (f" · {missing} sem preço" if missing else "")
+        )
         export = format_export(assembled)
         st.download_button(
             "Baixar lista",
@@ -404,9 +559,21 @@ def render_assembled_deck_sidebar(assembled: list[dict]) -> None:
 
         for section, cards in group_by_section(assembled):
             section_qty = sum(int(c["qty"]) for c in cards)
-            with st.expander(f"{section} ({section_qty})", expanded=True):
-                for card in cards:
-                    st.markdown(f"`{int(card['qty'])}x` {card['name']}")
+            section_rows, section_total, section_missing = _priced_deck_rows(cards)
+            with st.expander(
+                f"{section} ({section_qty}) · {format_brl_label(section_total)}",
+                expanded=True,
+            ):
+                _render_priced_rows(
+                    section_rows,
+                    show_total=True,
+                    total_brl=section_total,
+                    missing_prices=section_missing,
+                )
+
+        st.markdown(f"**Total do deck: {format_brl_label(total_brl)}**")
+        if missing:
+            st.caption(f"{missing} carta(s) sem preço em R$.")
 
 
 def _slim_card_for_storage(card: dict) -> dict:
@@ -549,7 +716,7 @@ def _streamlit_theme_is_dark() -> bool:
 
 
 def _render_hover_html(
-    body_html: str, *, height: int, enable_hover: bool = True
+    body_html: str, *, height: int, enable_hover: bool = True, scrolling: bool = True
 ) -> None:
     """Renderiza HTML com JS de preview (iframe components — hover confiável)."""
     components.html(
@@ -559,8 +726,11 @@ def _render_hover_html(
             enable_hover=enable_hover,
         ),
         height=height,
-        scrolling=True,
+        scrolling=scrolling,
     )
+
+
+
 
 
 def _cards_for_linkify() -> list[dict]:
@@ -612,7 +782,7 @@ def _render_chat_markdown(text: str, *, card_preview: bool = True) -> None:
 
 
 def render_assistant_message(content: str, *, message_key: str) -> None:
-    """Markdown / expanders `# Categoria` com preview nativo (sem iframe)."""
+    """Markdown / expanders `# Categoria` com hover de imagem e preços BRL."""
     del message_key
     parsed = parse_decklist_text(content)
     if not parsed.has_structured_list:
@@ -622,20 +792,31 @@ def render_assistant_message(content: str, *, message_key: str) -> None:
     if parsed.prose_before:
         _render_chat_markdown(parsed.prose_before)
 
-    # Expanders: st.popover (não components.html) — evita carta “flutuando”
-    # fora do bloco e artefatos na sidebar.
-    for block in parsed.blocks:
-        with st.expander(block.title, expanded=True):
-            for qty, name in block.cards:
-                url = cached_card_image_url(name)
-                left, right = st.columns([5, 1])
-                with left:
-                    st.markdown(f"`{qty}x` **{name}**")
-                with right:
-                    if url:
-                        with st.popover("carta", help=name):
-                            st.image(url, width=244)
-                            st.caption(name)
+    deck_total = 0.0
+    deck_missing = 0
+    with st.spinner("Carregando imagens e preços (R$)..."):
+        priced_blocks: list[tuple[str, list[dict], float, int]] = []
+        for block in parsed.blocks:
+            rows, section_total, section_missing = _priced_deck_rows(block.cards)
+            priced_blocks.append(
+                (block.title, rows, section_total, section_missing)
+            )
+            deck_total += section_total
+            deck_missing += section_missing
+
+    for title, rows, section_total, section_missing in priced_blocks:
+        section_qty = sum(int(r["qty"]) for r in rows)
+        with st.expander(
+            f"{title} ({section_qty}) · {format_brl_label(section_total)}",
+            expanded=True,
+        ):
+            _render_priced_rows(rows)
+
+    st.markdown(f"**Total do deck: {format_brl_label(round(deck_total, 2))}**")
+    if deck_missing:
+        st.caption(
+            f"{deck_missing} carta(s) sem preço em R$ (não entram no total)."
+        )
 
     if parsed.prose_after:
         _render_chat_markdown(parsed.prose_after)
@@ -768,17 +949,17 @@ def run_judge_mode(provider, settings) -> None:
 def _render_autopilot_panel(provider) -> None:
     st.subheader("Geração rápida (autopilot)")
     st.caption(
-        "Motor Python: comandante → pool → identidade → budget/curva → lista. "
-        "Sem micro-confirmações dos Passos 1–5."
+        "Motor Python: comandante → pool → identidade → budget LigaMagic (R$)/curva → lista. "
+        "Sem micro-confirmações dos Passos 1–5. A primeira geração pode demorar (consulta de preços)."
     )
     with st.form("autopilot_form"):
         commander = st.text_input("Comandante", placeholder="Niv-Mizzet, Parun")
         bracket = st.select_slider("Bracket", options=[1, 2, 3, 4, 5], value=3)
         budget = st.number_input(
-            "Orçamento máximo (USD — motor Scryfall)",
+            "Orçamento máximo (R$ — LigaMagic)",
             min_value=0.0,
-            value=150.0,
-            step=10.0,
+            value=800.0,
+            step=50.0,
         )
         submitted = st.form_submit_button("Gerar deck", type="primary")
 
@@ -790,16 +971,41 @@ def _render_autopilot_panel(provider) -> None:
         return
 
     clear_last_warning()
-    with st.spinner("Gerando deck no motor Python (pode levar um minuto)..."):
+    with st.spinner(
+        "Gerando deck (pool + preços LigaMagic em R$ — pode levar alguns minutos)..."
+    ):
         result = build_autopilot_deck(commander.strip(), int(bracket), float(budget))
 
     if not result.get("ok"):
         st.error(result.get("error") or "Falha na geração.")
+        opt = result.get("optimized") or {}
+        if opt or result.get("priced_count") is not None:
+            st.caption(
+                f"Métricas: precificadas={result.get('priced_count', '?')} · "
+                f"magias={opt.get('spell_count', '?')}/{opt.get('spell_slots', '?')} · "
+                f"shortfall magias={opt.get('spell_shortfall', '?')} · "
+                f"terrenos={opt.get('land_count', '?')}"
+            )
         return
+
+    warning = get_last_warning()
+    if warning:
+        st.warning(warning)
+    if result.get("warning"):
+        st.warning(result["warning"])
 
     export = result["export"]
     commander_name = result["commander"]["name"]
     total = result["optimized"].get("total_price", 0.0)
+    st.caption(
+        f"LigaMagic: R$ {float(result.get('total_brl', total)):.2f} · "
+        f"precificadas={result.get('priced_count', 0)} "
+        f"({result.get('priced_spells', 0)} magias) · "
+        f"magias={result.get('spell_count', 0)} · "
+        f"terrenos={result.get('land_count', 0)} · "
+        f"shortfall magias={result.get('spell_shortfall', 0)} · "
+        f"shortfall lands={result.get('land_shortfall', 0)}"
+    )
 
     with st.spinner("Frase de apresentação..."):
         answer = narrate_autopilot_deck(
@@ -807,7 +1013,7 @@ def _render_autopilot_panel(provider) -> None:
             export,
             commander_name=commander_name,
             bracket=int(bracket),
-            total_price_usd=float(total),
+            total_price_brl=float(total),
         )
 
     # Garante que a lista oficial exista na mensagem se o LLM falhar parcialmente.
@@ -819,7 +1025,7 @@ def _render_autopilot_panel(provider) -> None:
             "role": "user",
             "content": (
                 f"[Geração rápida] {commander_name} · Bracket {bracket} · "
-                f"budget USD {budget:.0f}"
+                f"budget R$ {budget:.0f}"
             ),
         }
     )
@@ -840,7 +1046,7 @@ def _render_upgrade_panel(provider) -> None:
             "Bracket alvo", options=[1, 2, 3, 4, 5], value=3, key="upgrade_bracket"
         )
         budget_note = st.text_input(
-            "Orçamento (texto livre)",
+            "Orçamento (R$ — texto livre)",
             placeholder="R$ 800 / sem limite",
             key="upgrade_budget",
         )
@@ -858,13 +1064,28 @@ def _render_upgrade_panel(provider) -> None:
         st.warning("Cole uma lista primeiro.")
         return
 
-    with st.spinner("Normalizando lista e detectando gaps..."):
+    clear_last_warning()
+    with st.spinner(
+        "Normalizando lista, preços LigaMagic (R$) e gaps (pode demorar)..."
+    ):
         brief, analysis = build_upgrade_brief(
             pasted,
             commander_name=commander.strip() or None,
             bracket=int(bracket),
             budget_note=budget_note.strip(),
         )
+
+    warning = get_last_warning()
+    if warning:
+        st.warning(warning)
+    st.caption(
+        f"Valor estimado LigaMagic: R$ {analysis.get('total_brl', 0):.2f}"
+        + (
+            f" · {len(analysis.get('unpriced') or [])} sem preço BRL"
+            if analysis.get("unpriced")
+            else ""
+        )
+    )
 
     user_msg = (
         f"Quero melhorar esta lista (Bracket {bracket}"
@@ -877,11 +1098,11 @@ def _render_upgrade_panel(provider) -> None:
     # Lista colada já entra na sidebar.
     _ingest_assistant_deck_text(pasted)
 
-    clear_last_warning()
     llm_input = (
         f"{brief}\n\n"
         "Com base na auditoria acima e na lista do jogador, inicie o Passo de upgrades "
-        "pelo pacote com maior déficit. Liste cortes e entradas no formato Nx Nome."
+        "pelo pacote com maior déficit. Liste cortes e entradas no formato Nx Nome. "
+        "Orçamento e preços só em R$ (LigaMagic)."
     )
     with st.spinner("Consultando o Deckbuilder (upgrade)..."):
         try:
@@ -916,7 +1137,7 @@ def run_deckbuilder_mode(provider) -> None:
     st.caption(
         "Oficina de Commander: chat em micro-passos, geração rápida (motor Python) "
         "ou melhoria de lista colada. A sidebar acumula a lista do deck. "
-        "Preços preferem LigaMagic (R$); fallback Scryfall USD."
+        "Orçamento em R$ via LigaMagic (mercado Brasil)."
     )
 
     # Conversas antigas / sessão sem lista: reconstrói a partir do chat.

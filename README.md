@@ -5,7 +5,7 @@ Protótipo local com dois modos:
 - **Modo Juiz** — RAG (Retrieval-Augmented Generation) sobre as Comprehensive Rules:
   cartas via Scryfall, resposta por LLM (Gemini, OpenAI ou Claude) com contexto recuperado.
 - **Modo Deckbuilder** — chat agentic em micro-passos, geração rápida (motor Python) ou
-  melhoria de lista colada. Tools de preço preferem LigaMagic (R$) com fallback Scryfall USD.
+  melhoria de lista colada. Orçamento em **R$ via LigaMagic** (mercado Brasil; sem USD).
 
 ## Arquitetura
 
@@ -74,7 +74,7 @@ Listas com `# Categoria` aparecem em expanders; no Juiz, passe o mouse no nome d
 No Deckbuilder, a sidebar **Lista do deck** acumula os pacotes sugeridos (com download).
 Conversas ficam em `data/conversations/`. Botão **↻ Repetir / próxima** reenvia a última mensagem.
 
-Com budget, as tools preferem LigaMagic (R$); se a busca falhar, usam Scryfall USD.
+Com budget, preços vêm só do LigaMagic (R$). Cartas sem preço BRL são sinalizadas; o app não usa Scryfall USD no orçamento.
 
 ## Compartilhar com pessoas próximas
 

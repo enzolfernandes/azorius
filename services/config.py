@@ -44,6 +44,10 @@ load_dotenv(PROJECT_ROOT / ".env")
 
 VALID_PROVIDERS = ("gemini", "openai", "claude")
 
+# Cotação provisória USD→BRL quando o LigaMagic não devolve preço.
+# Não exibir USD ao usuário; só alimentar o motor em R$ estimado.
+USD_BRL_RATE = 5.50
+
 _PROVIDER_KEY_VARS = {
     "gemini": "GOOGLE_API_KEY",
     "openai": "OPENAI_API_KEY",
@@ -63,6 +67,44 @@ class Settings:
 
 def _key_var_for(provider: str) -> str:
     return _PROVIDER_KEY_VARS[provider]
+
+
+def estimate_brl_from_usd(usd: float | None) -> float | None:
+    """Converte USD Scryfall → BRL com taxa fixa provisória. None se inválido."""
+    if usd is None:
+        return None
+    try:
+        value = float(usd)
+    except (TypeError, ValueError):
+        return None
+    if value < 0:
+        return None
+    return round(value * USD_BRL_RATE, 2)
+
+
+def resolve_brl_price(
+    *,
+    ligamagic_brl: float | None,
+    usd: float | None,
+) -> tuple[float | None, str | None]:
+    """BRL final: LigaMagic tem prioridade absoluta; Scryfall só se faltar BRL.
+
+    Diferenças vs. mercado internacional são esperadas — nunca descartar o
+    preço local por parecer 'barato' demais em relação ao USD.
+    Retorna (brl, source) com source in {ligamagic, estimated, None}.
+    """
+    try:
+        brl_f = float(ligamagic_brl) if ligamagic_brl is not None else None
+    except (TypeError, ValueError):
+        brl_f = None
+
+    if brl_f is not None and brl_f > 0:
+        return round(brl_f, 2), "ligamagic"
+
+    estimated = estimate_brl_from_usd(usd)
+    if estimated is not None:
+        return estimated, "estimated"
+    return None, None
 
 
 def settings_from_values(provider: str, api_key: str) -> Settings:

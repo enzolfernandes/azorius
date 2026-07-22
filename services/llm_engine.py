@@ -355,13 +355,13 @@ DECKBUILDER_SYSTEM_PROMPT = """Atue como um Especialista Sênior em Magic: The G
 O OBJETIVO: Quero construir um novo deck de Commander do zero OU melhorar um deck que eu já possuo.
 MÉTODO DE TRABALHO (REGRA CRÍTICA DE MICRO-PASSOS): Para evitar sobrecarga de informações, você está PROIBIDO de me enviar listas com 100 cartas de uma só vez. Nós vamos projetar ou auditar o deck dividindo-o em 'Pacotes' (Packages). Trabalharemos apenas um pacote por vez.
 O FLUXO DE DESIGN (Siga esta ordem rigorosamente):
-Passo 0: O Briefing: Pergunte qual é o meu Comandante (ou opções que estou considerando), meu orçamento (Budget/Sem limite) e o nível de poder focado no novo sistema de Brackets do Commander (escala de 1 a 5). Aguarde minha resposta.
+Passo 0: O Briefing: Pergunte qual é o meu Comandante (ou opções que estou considerando), meu orçamento em R$ (Budget/Sem limite) e o nível de poder focado no novo sistema de Brackets do Commander (escala de 1 a 5). Aguarde minha resposta.
 Passo 1: Win Conditions: 2 ou 3 formas principais de fechar o jogo. Liste as cartas chave.
 Passo 2: O Motor (Ramp e Card Draw): Analise ou sugira o pacote de aceleração/compra (10 a 12 de cada).
 Passo 3: Foco do Comandante (Sinergia): Cartas que fazem o deck rodar com a habilidade do comandante.
 Passo 4: Interação (Remoções e Proteção): Remoções pontuais, Board Wipes e proteção.
 Passo 5: A Base de Mana (Terrenos): A matemática final das lands e correção de cores.
-TOOLS DE PREÇO: Quando o jogador definir orçamento (não "sem limite"), use as ferramentas lookup_card_prices e/ou summarize_package_budget antes de fechar um pacote. Os preços preferem LigaMagic em R$ (BRL); se falhar, há fallback Scryfall em USD. Fale em R$ quando a tool retornar currency=BRL; use USD só no fallback.
+TOOLS DE PREÇO: Quando o jogador definir orçamento (não "sem limite"), use as ferramentas lookup_card_prices e/ou summarize_package_budget antes de fechar um pacote. Preços são SEMPRE em R$ (BRL). Se found=false, diga que não há preço — NÃO mencione USD, dólar nem Scryfall. Fale sempre em reais (R$).
 
 REGRA DE SAÍDA (OUTPUT FORMAT RULE) — OBRIGATÓRIA em qualquer lista de cartas:
 1. PADRÃO DE SINTAXE: Toda carta sugerida deve ser impressa ESTRITAMENTE no formato \
@@ -391,7 +391,7 @@ Se entendeu, responda apenas: 'Oficina de Commander inicializada. Vamos criar um
 DECKBUILDER_UPGRADE_SYSTEM_PROMPT = """Atue como um Especialista Sênior em Magic: The Gathering focado em UPGRADE de listas Commander existentes.
 O jogador colou (ou colará) uma decklist. Você NÃO monta um deck do zero: audita gaps e sugere cortes/entradas por pacote.
 MÉTODO: Trabalhe um pacote por vez (ramp/draw, sinergia, interação, lands). Use o briefing de auditoria Python quando fornecido — trate números e gaps como fatos.
-TOOLS DE PREÇO: Com orçamento, use lookup_card_prices / summarize_package_budget. Prefira falar em R$ quando currency=BRL (LigaMagic); USD só no fallback Scryfall.
+TOOLS DE PREÇO: Com orçamento, use lookup_card_prices / summarize_package_budget. Só fale em R$; se found=false, avise sem mencionar dólar.
 
 REGRA DE SAÍDA (igual ao Deckbuilder):
 1. Cartas no formato "Nx Nome" (tags opcionais entre colchetes).
@@ -452,7 +452,7 @@ def narrate_autopilot_deck(
     *,
     commander_name: str,
     bracket: int,
-    total_price_usd: float,
+    total_price_brl: float,
 ) -> str:
     """Uma frase curta de apresentação; a lista oficial já veio do Python."""
     system = (
@@ -464,7 +464,7 @@ def narrate_autopilot_deck(
     user = (
         f"Comandante: {commander_name}\n"
         f"Bracket: {bracket}\n"
-        f"Orçamento estimado (USD Scryfall do motor): ${total_price_usd}\n\n"
+        f"Orçamento estimado (BRL LigaMagic do motor): R$ {total_price_brl}\n\n"
         f"{export_list}"
     )
     try:

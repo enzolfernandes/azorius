@@ -11,7 +11,7 @@ from typing import Iterable
 
 from services.mana_symbols import MANA_SYMBOL_CSS, mana_symbol_img_html, MANA_SYMBOL_RE
 
-# Preview fixo no iframe (components.html) — segue o cursor.
+# Preview flutuante no iframe; redimensiona o frame no hover para não cortar a arte.
 PREVIEW_HOVER_SCRIPT = """
 <script>
 (function () {
@@ -29,30 +29,72 @@ PREVIEW_HOVER_SCRIPT = """
   ].join(";");
   document.body.appendChild(tip);
 
+  var baseHeight = null;
+
+  function measureContent() {
+    return Math.max(
+      document.body ? document.body.scrollHeight : 0,
+      document.documentElement ? document.documentElement.scrollHeight : 0
+    );
+  }
+
+  function applyFrameHeight(h) {
+    var frame = window.frameElement;
+    if (!frame) return;
+    var px = Math.ceil(Math.max(h, 32));
+    frame.style.height = px + "px";
+    frame.setAttribute("height", String(px));
+  }
+
+  function ensureBaseHeight() {
+    if (baseHeight == null) {
+      baseHeight = measureContent() || 40;
+    }
+  }
+
   function place(el) {
     var url = el.getAttribute("data-az-img");
     if (!url) return;
+    ensureBaseHeight();
     tip.innerHTML = '<img src="' + url + '" alt="" style="' +
       "width:220px;height:auto;border-radius:12px;" +
       "box-shadow:0 8px 28px rgba(0,0,0,0.55);" +
       '"/>';
     tip.style.display = "block";
-    var r = el.getBoundingClientRect();
-    var w = tip.offsetWidth || 220;
-    var h = tip.offsetHeight || 310;
-    // Prefere ABAIXO do nome — evita cobrir a pergunta/linha atual.
-    var x = r.left;
-    var y = r.bottom + 10;
-    if (x + w > window.innerWidth - 8) x = window.innerWidth - w - 8;
-    if (x < 4) x = 4;
-    if (y + h > window.innerHeight - 8) {
-      y = r.top - h - 10;
+
+    function layout() {
+      var r = el.getBoundingClientRect();
+      var w = tip.offsetWidth || 220;
+      var h = tip.offsetHeight || 310;
+      var vw = window.innerWidth;
+      // Abaixo do nome (lista); se não couber na viewport atual, sobe.
+      var x = r.left;
+      var y = r.bottom + 10;
+      if (y + h > window.innerHeight - 8) {
+        y = Math.max(4, r.top - h - 10);
+      }
+      if (x + w > vw - 8) x = vw - w - 8;
+      if (x < 4) x = 4;
+      if (y < 4) y = 4;
+      tip.style.left = x + "px";
+      tip.style.top = y + "px";
+      applyFrameHeight(Math.max(baseHeight, y + h + 16, measureContent()));
     }
-    if (y < 4) y = 4;
-    tip.style.left = x + "px";
-    tip.style.top = y + "px";
+
+    var img = tip.querySelector("img");
+    if (img && !img.complete) {
+      img.onload = layout;
+      img.onerror = layout;
+    }
+    layout();
   }
-  function hide() { tip.style.display = "none"; tip.innerHTML = ""; }
+
+  function hide() {
+    tip.style.display = "none";
+    tip.innerHTML = "";
+    ensureBaseHeight();
+    applyFrameHeight(baseHeight);
+  }
 
   document.addEventListener("mouseover", function (e) {
     var t = e.target.closest("[data-az-img]");
@@ -66,6 +108,13 @@ PREVIEW_HOVER_SCRIPT = """
     if (rel && t.contains(rel)) return;
     hide();
   });
+
+  // Altura inicial = só o conteúdo (sem caixa vazia permanente).
+  setTimeout(function () {
+    ensureBaseHeight();
+    baseHeight = measureContent() || baseHeight;
+    applyFrameHeight(baseHeight);
+  }, 0);
 })();
 </script>
 """
@@ -164,6 +213,40 @@ html, body {{
   font-size: 0.95em;
   color: {fg_muted};
 }}
+.az-deck-row {{
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.22rem 0;
+  border-bottom: 1px solid {border};
+}}
+.az-deck-row:last-child {{
+  border-bottom: none;
+}}
+.az-deck-name {{
+  flex: 1 1 auto;
+  min-width: 0;
+}}
+.az-deck-price {{
+  flex: 0 0 auto;
+  font-family: ui-monospace, "Cascadia Mono", monospace;
+  font-size: 0.9em;
+  color: {fg_muted};
+  white-space: nowrap;
+}}
+.az-deck-total {{
+  margin-top: 0.55rem;
+  padding-top: 0.45rem;
+  border-top: 1px solid {border};
+  font-weight: 650;
+  color: {heading};
+}}
+.az-deck-total-muted {{
+  font-weight: 500;
+  color: {fg_muted};
+  font-size: 0.9em;
+}}
 img.az-mana {{
   height: 1.2em;
   width: 1.2em;
@@ -189,6 +272,77 @@ def card_mark_html(name: str, image_url: str | None, *, qty: int | None = None) 
             f"{safe_name}</span>"
         )
     return f'{qty_html}<span class="az-card-mark">{safe_name}</span>'
+
+
+def format_brl_label(brl: float | None) -> str:
+    """R$ 12,50 ou — se ausente."""
+    if brl is None:
+        return "—"
+    try:
+        value = float(brl)
+    except (TypeError, ValueError):
+        return "—"
+    text = f"{value:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    return f"R$ {text}"
+
+
+def deck_rows_html(
+    rows: list[dict],
+    *,
+    show_total: bool = False,
+    total_brl: float | None = None,
+    missing_prices: int = 0,
+) -> str:
+    """Lista HTML com hover (data-az-img) e preço à direita.
+
+    Cada item: {qty, name, image_url?, brl?, line_brl?}.
+    """
+    parts: list[str] = ['<div class="az-deck-list">']
+    for row in rows:
+        qty = int(row.get("qty") or 1)
+        name = (row.get("name") or "").strip()
+        if not name:
+            continue
+        image_url = row.get("image_url")
+        line_brl = row.get("line_brl")
+        if line_brl is None and row.get("brl") is not None:
+            try:
+                line_brl = float(row["brl"]) * qty
+            except (TypeError, ValueError):
+                line_brl = None
+        mark = card_mark_html(name, image_url, qty=qty)
+        price = html.escape(format_brl_label(line_brl if line_brl is not None else row.get("brl")))
+        parts.append(
+            f'<div class="az-deck-row">'
+            f'<span class="az-deck-name">{mark}</span>'
+            f'<span class="az-deck-price">{price}</span>'
+            f"</div>"
+        )
+    if show_total:
+        total_label = html.escape(format_brl_label(total_brl))
+        note = ""
+        if missing_prices > 0:
+            note = (
+                f' <span class="az-deck-total-muted">'
+                f"({missing_prices} sem preço)</span>"
+            )
+        parts.append(
+            f'<div class="az-deck-total">Total: {total_label}{note}</div>'
+        )
+    parts.append("</div>")
+    return "".join(parts)
+
+
+def estimate_deck_list_height(n_rows: int, *, with_total: bool = False) -> int:
+    """Altura inicial do iframe = só as linhas (sem pad permanente para o tip).
+
+    O JS de hover expande o frame temporariamente ao mostrar a arte.
+    """
+    row_h = 34
+    base = row_h * max(1, n_rows) + 16
+    if with_total:
+        base += 40
+    return min(1400, max(36, base))
 
 
 def _name_lookup(cards: Iterable[dict]) -> dict[str, dict]:

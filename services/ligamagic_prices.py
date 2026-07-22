@@ -1,7 +1,8 @@
 """Preços em BRL via LigaMagic (HTTP best-effort + cache em disco).
 
-Degrada com elegância: em falha de rede/HTML devolve None e o chamador
-usa Scryfall USD como fallback.
+Fonte preferencial de orçamento no mercado Brasil. Em falha devolve None;
+o chamador pode estimar BRL a partir do USD Scryfall (cotação fixa) sem
+exibir dólar ao usuário.
 """
 
 from __future__ import annotations
@@ -143,7 +144,7 @@ def fetch_ligamagic_brl(card_name: str) -> float | None:
         try:
             response = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
         except requests.RequestException as exc:
-            _set_warning(f"LigaMagic indisponível ({exc.__class__.__name__}). Usando Scryfall USD.")
+            _set_warning(f"LigaMagic indisponível ({exc.__class__.__name__}).")
             return None
         if response.status_code != 200 or not response.text:
             continue
@@ -152,9 +153,7 @@ def fetch_ligamagic_brl(card_name: str) -> float | None:
             _write_cache(name, price)
             return price
 
-    _set_warning(
-        "Preço LigaMagic não encontrado para uma ou mais cartas; usando Scryfall USD quando possível."
-    )
+    _set_warning("Preço LigaMagic não encontrado para uma ou mais cartas.")
     return None
 
 

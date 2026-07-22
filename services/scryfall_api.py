@@ -416,7 +416,7 @@ def fetch_commander(name: str) -> dict | None:
 
 
 def fetch_card_market_info(name: str) -> dict | None:
-    """Resolve nome + mana_cost + preço USD para tools do Deckbuilder agentic."""
+    """Resolve nome + mana_cost (+ usd Scryfall só como metadado; orçamento BR usa LigaMagic)."""
     card = _lookup_card_raw(name)
     if card is None:
         return None

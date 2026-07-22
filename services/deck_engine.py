@@ -18,6 +18,17 @@ from .scryfall_api import (
 )
 
 DECK_SIZE = 99
+# Quotas de terreno (pad de básicos só preenche estes slots — nunca come magias).
+LAND_SLOTS_MIN = 34
+LAND_SLOTS_MAX = 38
+# Se faltar mais que isto de magias precificadas, a geração falha em vez de virar 80 basics.
+MAX_SPELL_SHORTFALL = 20
+# Alvos mínimos de role entre as magias (heurística barata).
+SPELL_ROLE_TARGETS: dict[str, int] = {
+    "ramp": 8,
+    "draw": 8,
+    "interaction": 8,
+}
 
 # Curvas-alvo por Bracket (slots por CMC 0..7+). Soma de cada mapa = 99.
 # Brackets baixos: mais top-end / mana barata; altos: mais low-curve.
@@ -29,13 +40,26 @@ BRACKET_CURVES: dict[int, dict[int, int]] = {
     5: {0: 34, 1: 16, 2: 18, 3: 14, 4: 9, 5: 5, 6: 2, 7: 1},
 }
 
+_BASIC_TYPE_TO_COLOR = {
+    "plains": "W",
+    "island": "U",
+    "swamp": "B",
+    "mountain": "R",
+    "forest": "G",
+}
+
+_BASIC_LAND_NAMES = frozenset(
+    {"Plains", "Island", "Swamp", "Mountain", "Forest", "Wastes"}
+)
+
+
 # Básicos usados para completar até 99 quando o pool Scryfall não basta.
 _BASIC_LANDS: dict[str, dict[str, Any]] = {
     "W": {
         "name": "Plains",
         "color_identity": ["W"],
         "cmc": 0.0,
-        "prices": {"usd": 0.0},
+        "prices": {"usd": 0.0, "brl": 0.0},
         "type_line": "Basic Land — Plains",
         "oracle_text": "({T}: Add {W}.)",
     },
@@ -43,7 +67,7 @@ _BASIC_LANDS: dict[str, dict[str, Any]] = {
         "name": "Island",
         "color_identity": ["U"],
         "cmc": 0.0,
-        "prices": {"usd": 0.0},
+        "prices": {"usd": 0.0, "brl": 0.0},
         "type_line": "Basic Land — Island",
         "oracle_text": "({T}: Add {U}.)",
     },
@@ -51,7 +75,7 @@ _BASIC_LANDS: dict[str, dict[str, Any]] = {
         "name": "Swamp",
         "color_identity": ["B"],
         "cmc": 0.0,
-        "prices": {"usd": 0.0},
+        "prices": {"usd": 0.0, "brl": 0.0},
         "type_line": "Basic Land — Swamp",
         "oracle_text": "({T}: Add {B}.)",
     },
@@ -59,7 +83,7 @@ _BASIC_LANDS: dict[str, dict[str, Any]] = {
         "name": "Mountain",
         "color_identity": ["R"],
         "cmc": 0.0,
-        "prices": {"usd": 0.0},
+        "prices": {"usd": 0.0, "brl": 0.0},
         "type_line": "Basic Land — Mountain",
         "oracle_text": "({T}: Add {R}.)",
     },
@@ -67,7 +91,7 @@ _BASIC_LANDS: dict[str, dict[str, Any]] = {
         "name": "Forest",
         "color_identity": ["G"],
         "cmc": 0.0,
-        "prices": {"usd": 0.0},
+        "prices": {"usd": 0.0, "brl": 0.0},
         "type_line": "Basic Land — Forest",
         "oracle_text": "({T}: Add {G}.)",
     },
@@ -76,21 +100,48 @@ _COLORLESS_BASIC = {
     "name": "Wastes",
     "color_identity": [],
     "cmc": 0.0,
-    "prices": {"usd": 0.0},
+    "prices": {"usd": 0.0, "brl": 0.0},
     "type_line": "Basic Land",
     "oracle_text": "({T}: Add {C}.)",
 }
 
 
 def _card_price(card: dict) -> float:
-    """USD da carta; sem preço = infinito (fica por último / fora do corte barato)."""
-    usd = (card.get("prices") or {}).get("usd")
-    if usd is None:
+    """BRL (LigaMagic ou estimado); sem preço = infinito (fora do corte)."""
+    brl = (card.get("prices") or {}).get("brl")
+    if brl is None:
         return float("inf")
     try:
-        return float(usd)
+        return float(brl)
     except (TypeError, ValueError):
         return float("inf")
+
+
+def enrich_cards_with_ligamagic_brl(card_pool: list[dict]) -> list[dict]:
+    """Anexa `prices.brl`: LigaMagic primeiro; senão USD Scryfall × taxa fixa.
+
+    O BRL estimado fica só no motor (orçamento). Não expõe USD na UI.
+    """
+    from .config import resolve_brl_price
+    from .ligamagic_prices import fetch_ligamagic_brl
+
+    enriched: list[dict] = []
+    for card in card_pool:
+        item = dict(card)
+        prices = dict(item.get("prices") or {})
+        name = (item.get("name") or "").strip()
+        liga = None
+        if prices.get("brl") is not None and prices.get("brl_source") == "ligamagic":
+            liga = prices.get("brl")
+        elif name:
+            liga = fetch_ligamagic_brl(name)
+        brl, source = resolve_brl_price(ligamagic_brl=liga, usd=prices.get("usd"))
+        if brl is not None:
+            prices["brl"] = brl
+            prices["brl_source"] = source
+        item["prices"] = prices
+        enriched.append(item)
+    return enriched
 
 
 def _cmc_bucket(card: dict) -> int:
@@ -100,6 +151,109 @@ def _cmc_bucket(card: dict) -> int:
     except (TypeError, ValueError):
         cmc = 0.0
     return min(max(int(cmc), 0), 7)
+
+
+def _is_land(card: dict) -> bool:
+    return "land" in (card.get("type_line") or "").lower()
+
+
+def _is_basic_land(card: dict) -> bool:
+    name = (card.get("name") or "").strip()
+    if name in _BASIC_LAND_NAMES:
+        return True
+    return "basic land" in (card.get("type_line") or "").lower()
+
+
+def _fetch_basic_colors(oracle: str) -> set[str]:
+    """Cores dos básicos nomeados num fetch (oracle com 'search')."""
+    text = (oracle or "").lower()
+    if "search" not in text:
+        return set()
+    found: set[str] = set()
+    for basic, color in _BASIC_TYPE_TO_COLOR.items():
+        if basic in text:
+            found.add(color)
+    return found
+
+
+def land_fits_commander_colors(card: dict, commander_colors: list[str]) -> bool:
+    """Rejeita fetches que só (ou também) buscam básicos fora da identidade."""
+    if not _is_land(card):
+        return True
+    searched = _fetch_basic_colors(card.get("oracle_text") or "")
+    if not searched:
+        return True
+    allowed = {c.upper() for c in commander_colors}
+    return searched <= allowed
+
+
+def classify_spell_role(card: dict) -> str:
+    """Heurística mínima: ramp / draw / interaction / other (não-land)."""
+    if _is_land(card):
+        return "land"
+    type_line = (card.get("type_line") or "").lower()
+    oracle = (card.get("oracle_text") or "").lower()
+    name = (card.get("name") or "").lower()
+
+    if any(
+        k in oracle
+        for k in (
+            "destroy all",
+            "exile all",
+            "destroy target",
+            "exile target",
+            "counter target",
+            "return target",
+            "fight",
+        )
+    ) or any(k in name for k in ("wrath", "removal")):
+        return "interaction"
+    if any(
+        k in oracle
+        for k in (
+            "hexproof",
+            "indestructible",
+            "protection from",
+            "ward",
+            "can't be countered",
+        )
+    ):
+        return "interaction"
+    if (
+        any(
+            k in oracle
+            for k in (
+                "add {",
+                "search your library for a land",
+                "put a land",
+                "mana of any color",
+            )
+        )
+        or "sol ring" in name
+        or ("artifact" in type_line and "add {" in oracle)
+    ):
+        return "ramp"
+    if any(
+        k in oracle
+        for k in (
+            "draw a card",
+            "draw two",
+            "draw three",
+            "draw four",
+            "look at the top",
+            "scry",
+        )
+    ):
+        return "draw"
+    return "other"
+
+
+def filter_pool_for_commander(
+    card_pool: list[dict], commander_colors: list[str]
+) -> list[dict]:
+    """Identidade de cor + fetches compatíveis com as cores do comandante."""
+    legal = enforce_color_identity(commander_colors, card_pool)
+    return [c for c in legal if land_fits_commander_colors(c, commander_colors)]
 
 
 def enforce_color_identity(
@@ -126,22 +280,52 @@ def _make_basic(color: str) -> dict:
     return dict(_COLORLESS_BASIC)
 
 
-def _pad_with_basics(
-    deck: list[dict],
+def _land_slot_target(target_curve: dict[int, int]) -> int:
+    raw = int(target_curve.get(0, 36))
+    return min(LAND_SLOTS_MAX, max(LAND_SLOTS_MIN, raw))
+
+
+def _normalize_curve(target_curve: dict[int, int], size: int) -> dict[int, int]:
+    target = {b: int(target_curve.get(b, 0)) for b in range(8)}
+    curve_sum = sum(target.values())
+    if curve_sum < size:
+        target[0] += size - curve_sum
+    elif curve_sum > size:
+        overflow = curve_sum - size
+        for bucket in range(7, -1, -1):
+            cut = min(target[bucket], overflow)
+            target[bucket] -= cut
+            overflow -= cut
+            if overflow <= 0:
+                break
+    return target
+
+
+def _spell_curve_from_bracket(
+    bracket_curve: dict[int, int], spell_slots: int
+) -> dict[int, int]:
+    """Curva de magias: tira a fatia de CMC0 reservada a terrenos."""
+    land_slots = _land_slot_target(bracket_curve)
+    adjusted = dict(bracket_curve)
+    adjusted[0] = max(0, int(adjusted.get(0, 0)) - land_slots)
+    return _normalize_curve(adjusted, spell_slots)
+
+
+def _pad_lands_with_basics(
+    lands: list[dict],
     commander_colors: list[str],
-    max_budget: float,
-    spent: float,
+    land_target: int,
 ) -> list[dict]:
-    """Completa até 99 com básicos (preço 0) na identidade do comandante."""
-    result = list(deck)
+    """Completa só até `land_target` com básicos na identidade."""
+    result = list(lands)
     colors = [c.upper() for c in commander_colors if c.upper() in _BASIC_LANDS]
     if not colors:
         colors = [""]
     idx = 0
-    while len(result) < DECK_SIZE and spent <= max_budget + 1e-9:
+    while len(result) < land_target:
         result.append(_make_basic(colors[idx % len(colors)]))
         idx += 1
-    return result
+    return result[:land_target]
 
 
 def enforce_budget_and_curve(
@@ -151,46 +335,28 @@ def enforce_budget_and_curve(
     *,
     commander_colors: list[str] | None = None,
 ) -> dict:
-    """Seleciona até 99 cartas respeitando orçamento USD e curva-alvo.
+    """Seleciona até 99 cartas: magias primeiro (orçamento), lands depois.
 
-    Retorno:
-        {
-          "deck": list[dict],
-          "total_price": float,
-          "curve_achieved": dict[int, int],
-          "shortfall": int,  # quantas cartas faltaram para 99 antes dos básicos
-          "target_curve": dict[int, int],
-        }
+    Terrenos caros não podem comer o budget antes das magias. Lands não-básicos
+    usam só o residual; o restante dos slots de terreno vai de básico (R$ 0).
     """
-    # Normaliza a curva-alvo para buckets 0..7.
-    target = {b: int(target_curve.get(b, 0)) for b in range(8)}
-    # Se a soma da curva não for 99, redistribui o residual no CMC 0 (lands).
-    curve_sum = sum(target.values())
-    if curve_sum < DECK_SIZE:
-        target[0] += DECK_SIZE - curve_sum
-    elif curve_sum > DECK_SIZE:
-        # Corta do top-end para baixo até caber em 99.
-        overflow = curve_sum - DECK_SIZE
-        for bucket in range(7, -1, -1):
-            cut = min(target[bucket], overflow)
-            target[bucket] -= cut
-            overflow -= cut
-            if overflow <= 0:
-                break
+    colors = list(commander_colors or [])
+    land_target = _land_slot_target(target_curve)
+    spell_slots = DECK_SIZE - land_target
+    spell_curve = _spell_curve_from_bracket(target_curve, spell_slots)
 
-    by_bucket: dict[int, list[dict]] = {b: [] for b in range(8)}
-    for card in card_pool:
-        by_bucket[_cmc_bucket(card)].append(card)
-    for bucket in by_bucket:
-        by_bucket[bucket].sort(key=_card_price)
+    lands_pool = [c for c in card_pool if _is_land(c)]
+    spells_pool = [c for c in card_pool if not _is_land(c)]
 
-    selected: list[dict] = []
+    selected_lands: list[dict] = []
+    selected_spells: list[dict] = []
     selected_names: set[str] = set()
     spent = 0.0
-    slots_filled = {b: 0 for b in range(8)}
 
-    def try_add(card: dict) -> bool:
+    def try_add(card: dict, bucket: list[dict], cap: int) -> bool:
         nonlocal spent
+        if len(bucket) >= cap:
+            return False
         name = (card.get("name") or "").strip().lower()
         if not name or name in selected_names:
             return False
@@ -199,59 +365,88 @@ def enforce_budget_and_curve(
             return False
         if spent + price > max_budget + 1e-9:
             return False
-        selected.append(card)
+        bucket.append(card)
         selected_names.add(name)
         spent += price
-        slots_filled[_cmc_bucket(card)] += 1
         return True
 
-    # 1) Preenche slots da curva, preferindo as mais baratas de cada bucket.
-    for bucket in range(8):
-        need = target[bucket]
-        for card in by_bucket[bucket]:
-            if slots_filled[bucket] >= need:
+    # --- Magias primeiro (prioridade do orçamento) ---
+    by_role: dict[str, list[dict]] = {
+        "ramp": [],
+        "draw": [],
+        "interaction": [],
+        "other": [],
+    }
+    for card in spells_pool:
+        role = classify_spell_role(card)
+        if role == "land":
+            continue
+        by_role.setdefault(role, []).append(card)
+    for role in by_role:
+        by_role[role].sort(key=_card_price)
+
+    # 1) Mínimos de role (baratas dentro de cada pacote).
+    role_filled = {role: 0 for role in SPELL_ROLE_TARGETS}
+    for role, need in SPELL_ROLE_TARGETS.items():
+        for card in by_role.get(role, []):
+            if role_filled[role] >= need:
                 break
-            try_add(card)
+            if try_add(card, selected_spells, spell_slots):
+                role_filled[role] += 1
 
-    # 2) Completa até 99 com as mais baratas restantes (qualquer CMC).
-    leftovers = sorted(
-        (
-            card
-            for bucket in range(8)
-            for card in by_bucket[bucket]
-            if (card.get("name") or "").strip().lower() not in selected_names
-        ),
-        key=_card_price,
-    )
-    for card in leftovers:
-        if len(selected) >= DECK_SIZE:
+    # 2) Resto: sempre as mais baratas globais (curva vira métrica, não travamento).
+    # Em orçamento baixo, forçar CMC-alvo impede encher os 63 slots.
+    for card in sorted(spells_pool, key=_card_price):
+        if len(selected_spells) >= spell_slots:
             break
-        try_add(card)
+        try_add(card, selected_spells, spell_slots)
 
-    shortfall_before_basics = max(0, DECK_SIZE - len(selected))
-    colors = list(commander_colors or [])
+    spell_shortfall = max(0, spell_slots - len(selected_spells))
+    spent_after_spells = spent
+
+    # --- Terrenos: só com residual do orçamento; resto = básicos grátis ---
+    for card in sorted(lands_pool, key=_card_price):
+        if len(selected_lands) >= land_target:
+            break
+        try_add(card, selected_lands, land_target)
+
+    land_shortfall = max(0, land_target - len(selected_lands))
+    selected_lands = _pad_lands_with_basics(selected_lands, colors, land_target)
+
+    selected = list(selected_spells) + list(selected_lands)
+    spell_slot_basics = 0
     if len(selected) < DECK_SIZE:
-        selected = _pad_with_basics(selected, colors, max_budget, spent)
-        # Básicos têm preço 0; spent permanece.
+        before = len(selected)
+        selected = _pad_lands_with_basics(selected, colors, DECK_SIZE)
+        spell_slot_basics = len(selected) - before
 
-    # Garante teto de 99 (não ultrapassar).
     selected = selected[:DECK_SIZE]
     total_price = sum(
         0.0 if _card_price(c) == float("inf") else _card_price(c) for c in selected
     )
+    role_counts = Counter(classify_spell_role(c) for c in selected_spells)
 
     return {
         "deck": selected,
         "total_price": round(total_price, 2),
+        "currency": "BRL",
         "curve_achieved": _curve_achieved(selected),
-        "shortfall": shortfall_before_basics,
-        "target_curve": target,
+        "target_curve": target_curve,
+        "spell_curve": spell_curve,
+        "shortfall": spell_shortfall + land_shortfall,
+        "spell_shortfall": spell_shortfall,
+        "land_shortfall": land_shortfall,
+        "spell_count": len(selected_spells),
+        "land_count": land_target,
+        "land_target": land_target,
+        "spell_slots": spell_slots,
+        "role_counts": dict(role_counts),
+        "basics_padded": land_shortfall + spell_slot_basics,
+        "spell_slot_basics": spell_slot_basics,
+        "degraded": spell_shortfall > 0,
+        "spent_after_spells": round(spent_after_spells, 2),
+        "budget_spent": round(spent, 2),
     }
-
-
-_BASIC_LAND_NAMES = frozenset(
-    {"Plains", "Island", "Swamp", "Mountain", "Forest", "Wastes"}
-)
 
 
 def consolidate_card_counts(cards: list[dict]) -> list[tuple[str, int]]:
@@ -264,13 +459,6 @@ def consolidate_card_counts(cards: list[dict]) -> list[tuple[str, int]]:
     return sorted(counts.items(), key=lambda item: item[0].lower())
 
 
-def _is_basic_land(card: dict) -> bool:
-    name = (card.get("name") or "").strip()
-    if name in _BASIC_LAND_NAMES:
-        return True
-    return "basic land" in (card.get("type_line") or "").lower()
-
-
 def format_decklist_export(
     cards: list[dict],
     *,
@@ -278,8 +466,7 @@ def format_decklist_export(
 ) -> str:
     """Lista crua estilo Moxfield/Arena: '# Categoria' e linhas 'Nx Nome'.
 
-    Terrenos básicos e demais cartas são agrupados via Counter — nunca uma
-    linha por cópia de básico.
+    `# Terrenos` = qualquer land (type_line); `# Spells` = restante.
     """
     lines: list[str] = []
     if commander_name and commander_name.strip():
@@ -287,18 +474,18 @@ def format_decklist_export(
         lines.append(f"1x {commander_name.strip()}")
         lines.append("")
 
-    basics = [c for c in cards if _is_basic_land(c)]
-    others = [c for c in cards if not _is_basic_land(c)]
+    lands = [c for c in cards if _is_land(c)]
+    spells = [c for c in cards if not _is_land(c)]
 
-    if others:
+    if spells:
         lines.append("# Spells")
-        for name, qty in consolidate_card_counts(others):
+        for name, qty in consolidate_card_counts(spells):
             lines.append(f"{qty}x {name}")
         lines.append("")
 
-    if basics:
+    if lands:
         lines.append("# Terrenos")
-        for name, qty in consolidate_card_counts(basics):
+        for name, qty in consolidate_card_counts(lands):
             lines.append(f"{qty}x {name}")
 
     return ("\n".join(lines).rstrip() + "\n") if lines else ""
@@ -319,7 +506,9 @@ def generate_decklist_prompt(
         deck = list(optimized_pool.get("deck") or [])
         total_price = optimized_pool.get("total_price")
         curve = optimized_pool.get("curve_achieved") or _curve_achieved(deck)
-        shortfall = optimized_pool.get("shortfall", 0)
+        shortfall = optimized_pool.get(
+            "spell_shortfall", optimized_pool.get("shortfall", 0)
+        )
         target = optimized_pool.get("target_curve") or {}
     else:
         deck = list(optimized_pool or [])
@@ -346,10 +535,10 @@ def generate_decklist_prompt(
     return f"""## DECKLIST OFICIAL (GERADA EM PYTHON — NÃO ALTERAR)
 Comandante: {commander_name}
 Cartas no deck (99-slot, sem o comandante): {len(deck)}
-Orçamento total (USD, soma Scryfall): ${total_price}
+Orçamento total (BRL, soma LigaMagic): R$ {total_price}
 Curva alcançada: {curve_lines}
 Curva-alvo: {target_lines}
-Shortfall antes de básicos: {shortfall}
+Shortfall de magias: {shortfall}
 
 ### Pedido do jogador
 {request}
@@ -373,9 +562,10 @@ DECKBUILDER_TOOLS: list[dict[str, Any]] = [
     {
         "name": "lookup_card_prices",
         "description": (
-            "Consulta preços de cartas (preferência LigaMagic em BRL; fallback "
-            "Scryfall USD) e custo de mana. Use antes de sugerir um pacote quando "
-            "o jogador definiu orçamento."
+            "Consulta preços em R$ (BRL). Preferência LigaMagic; se não houver "
+            "preço local, estima BRL internamente. Sempre fale em R$ com o "
+            "jogador — nunca mencione USD/dólar/Scryfall. Cartas sem preço "
+            "retornam found=false. Use com orçamento definido."
         ),
         "parameters": {
             "type": "object",
@@ -392,8 +582,8 @@ DECKBUILDER_TOOLS: list[dict[str, Any]] = [
     {
         "name": "summarize_package_budget",
         "description": (
-            "Soma o preço de um pacote (BRL via LigaMagic quando possível, senão "
-            "USD Scryfall) e compara com o orçamento máximo do Passo 0."
+            "Soma o preço de um pacote em R$ (LigaMagic) e compara com o "
+            "orçamento máximo do Passo 0. Cartas sem BRL entram em missing."
         ),
         "parameters": {
             "type": "object",
@@ -403,11 +593,10 @@ DECKBUILDER_TOOLS: list[dict[str, Any]] = [
                     "items": {"type": "string"},
                     "description": "Nomes das cartas do pacote.",
                 },
-                "max_budget_usd": {
+                "max_budget_brl": {
                     "type": "number",
                     "description": (
-                        "Orçamento máximo na moeda conversada (R$ se LigaMagic; "
-                        "USD se só Scryfall). Omita ou null se sem limite."
+                        "Orçamento máximo em reais (R$). Omita ou null se sem limite."
                     ),
                 },
             },
@@ -420,11 +609,15 @@ DECKBUILDER_TOOLS: list[dict[str, Any]] = [
 def build_autopilot_deck(
     commander_name: str,
     bracket: int,
-    max_budget_usd: float,
+    max_budget_brl: float,
     *,
     pool_size: int = 400,
 ) -> dict[str, Any]:
-    """Gera lista Commander completa via motor Python (sem micro-passos LLM)."""
+    """Gera lista Commander completa via motor Python (sem micro-passos LLM).
+
+    Orçamento em BRL (LigaMagic). Lands e magias em quotas separadas; falha se
+    o shortfall de magias for alto demais (não entrega 80 basics como sucesso).
+    """
     name = (commander_name or "").strip()
     if not name:
         return {"ok": False, "error": "Informe o nome do comandante."}
@@ -437,7 +630,7 @@ def build_autopilot_deck(
         return {"ok": False, "error": "Bracket deve ser entre 1 e 5."}
 
     try:
-        budget = float(max_budget_usd)
+        budget = float(max_budget_brl)
     except (TypeError, ValueError):
         return {"ok": False, "error": "Orçamento inválido."}
     if budget < 0:
@@ -447,31 +640,97 @@ def build_autopilot_deck(
     if commander is None:
         return {"ok": False, "error": f"Comandante não encontrado no Scryfall: {name}"}
 
+    ci = commander.get("color_identity") or []
     pool = fetch_commander_card_pool(commander["name"], max_cards=pool_size)
-    legal = enforce_color_identity(commander.get("color_identity") or [], pool)
+    legal = filter_pool_for_commander(pool, ci)
+    priced = enrich_cards_with_ligamagic_brl(legal)
+    priced_count = sum(
+        1 for c in priced if (c.get("prices") or {}).get("brl") is not None
+    )
+    priced_spells = sum(
+        1
+        for c in priced
+        if not _is_land(c) and (c.get("prices") or {}).get("brl") is not None
+    )
     optimized = enforce_budget_and_curve(
-        legal,
+        priced,
         budget,
         BRACKET_CURVES[bracket_n],
-        commander_colors=commander.get("color_identity") or [],
+        commander_colors=ci,
     )
+
+    spell_shortfall = int(optimized.get("spell_shortfall") or 0)
+    spell_count = int(optimized.get("spell_count") or 0)
+    spell_slots = int(optimized.get("spell_slots") or (DECK_SIZE - 36))
+
+    if spell_shortfall > MAX_SPELL_SHORTFALL:
+        if priced_spells >= spell_slots - MAX_SPELL_SHORTFALL:
+            error = (
+                f"Orçamento R$ {budget:.0f} apertado demais: só couberam "
+                f"{spell_count} de {spell_slots} magias (faltam {spell_shortfall}), "
+                f"mesmo com {priced_spells} magias precificadas no pool. "
+                f"Aumente o orçamento ou use o chat em micro-passos."
+            )
+        else:
+            error = (
+                f"Poucas cartas com preço utilizável: só {spell_count} magias de "
+                f"{spell_slots} slots (faltam {spell_shortfall}). "
+                f"Precificadas no pool: {priced_count} ({priced_spells} magias). "
+                f"Tente de novo mais tarde ou use o chat em micro-passos."
+            )
+        return {
+            "ok": False,
+            "error": error,
+            "commander": commander,
+            "bracket": bracket_n,
+            "max_budget_brl": budget,
+            "priced_count": priced_count,
+            "priced_spells": priced_spells,
+            "optimized": optimized,
+            "pool_size": len(pool),
+            "legal_size": len(legal),
+        }
+
     export = format_decklist_export(
         optimized["deck"], commander_name=commander["name"]
     )
+    warning = None
+    if optimized.get("degraded") or int(optimized.get("spell_slot_basics") or 0) > 0:
+        warning = (
+            f"Lista degradada: faltaram {spell_shortfall} magias com preço BRL; "
+            f"{optimized.get('spell_slot_basics', 0)} slots foram preenchidos com "
+            f"básicos. Roles: {optimized.get('role_counts') or {}}."
+        )
     return {
         "ok": True,
         "commander": commander,
         "bracket": bracket_n,
-        "max_budget_usd": budget,
+        "max_budget_brl": budget,
+        "currency": "BRL",
+        "price_source": "ligamagic",
+        "priced_count": priced_count,
+        "priced_spells": priced_spells,
         "optimized": optimized,
         "export": export,
         "pool_size": len(pool),
         "legal_size": len(legal),
+        "spell_count": spell_count,
+        "land_count": int(optimized.get("land_count") or 0),
+        "spell_shortfall": spell_shortfall,
+        "land_shortfall": int(optimized.get("land_shortfall") or 0),
+        "total_brl": float(optimized.get("total_price") or 0),
+        "degraded": bool(optimized.get("degraded")),
+        "warning": warning,
     }
 
 
 def lookup_card_prices(card_names: list[str]) -> list[dict[str, Any]]:
-    """Precifica cartas: LigaMagic BRL primeiro, Scryfall USD como fallback."""
+    """Precifica cartas em BRL: LigaMagic, senão USD Scryfall × taxa fixa.
+
+    A resposta ao LLM/UI fica só em R$ (sem campo USD). Fonte interna
+    `estimated` = conversão provisória — não mencionar dólar ao jogador.
+    """
+    from .config import resolve_brl_price
     from .ligamagic_prices import fetch_ligamagic_brl
 
     results: list[dict[str, Any]] = []
@@ -490,59 +749,39 @@ def lookup_card_prices(card_names: list[str]) -> list[dict[str, Any]]:
                     "query": query,
                     "name": query,
                     "mana_cost": "",
-                    "usd": None,
                     "brl": None,
                     "price": None,
-                    "currency": None,
+                    "currency": "BRL",
                     "source": None,
                     "found": False,
                 }
             )
             continue
 
-        brl = fetch_ligamagic_brl(info["name"])
-        if brl is not None:
-            results.append(
-                {
-                    "query": query,
-                    "name": info["name"],
-                    "mana_cost": info.get("mana_cost", ""),
-                    "usd": info.get("usd"),
-                    "brl": brl,
-                    "price": brl,
-                    "currency": "BRL",
-                    "source": "ligamagic",
-                    "found": True,
-                }
-            )
-            continue
-
-        usd = info.get("usd")
+        liga = fetch_ligamagic_brl(info["name"])
+        brl, source = resolve_brl_price(ligamagic_brl=liga, usd=info.get("usd"))
+        found = brl is not None
         results.append(
             {
                 "query": query,
                 "name": info["name"],
                 "mana_cost": info.get("mana_cost", ""),
-                "usd": usd,
-                "brl": None,
-                "price": usd,
-                "currency": "USD" if usd is not None else None,
-                "source": "scryfall" if usd is not None else None,
-                "found": usd is not None,
+                "brl": brl,
+                "price": brl,
+                "currency": "BRL",
+                "source": source if found else None,
+                "found": found,
             }
         )
     return results
 
 
 def summarize_package_budget(
-    card_names: list[str], max_budget_usd: float | None = None
+    card_names: list[str], max_budget_brl: float | None = None
 ) -> dict[str, Any]:
-    """Soma preços do pacote (moeda dominante) e valida orçamento."""
+    """Soma preços do pacote em R$ (LigaMagic) e valida orçamento."""
     priced = lookup_card_prices(card_names)
     total_brl = 0.0
-    total_usd = 0.0
-    n_brl = 0
-    n_usd = 0
     missing: list[str] = []
     priced_cards: list[dict[str, Any]] = []
     for item in priced:
@@ -550,51 +789,33 @@ def summarize_package_budget(
             missing.append(item["name"])
             continue
         priced_cards.append(item)
-        if item.get("currency") == "BRL":
-            total_brl += float(item["price"])
-            n_brl += 1
-        else:
-            total_usd += float(item["price"])
-            n_usd += 1
-
-    # Moeda de relatório: BRL se maioria veio do LigaMagic.
-    if n_brl >= n_usd and n_brl > 0:
-        currency = "BRL"
-        total = total_brl
-        # Converte USD residual de forma grosseira só para somar (não misturar na UI).
-        # Preferimos reportar só o que está na moeda principal + aviso.
-        if n_usd:
-            total = total_brl  # ignora USD na soma BRL; listados em missing_fx
-    else:
-        currency = "USD"
-        total = total_usd
+        total_brl += float(item["price"])
 
     budget: float | None
-    if max_budget_usd is None:
+    if max_budget_brl is None:
         budget = None
         within = True
     else:
         try:
-            budget = float(max_budget_usd)
+            budget = float(max_budget_brl)
         except (TypeError, ValueError):
             budget = None
             within = True
         else:
-            within = total <= budget + 1e-9
+            within = total_brl <= budget + 1e-9
 
     return {
-        "total": round(total, 2),
-        "currency": currency,
-        "total_usd": round(total_usd, 2),
+        "total": round(total_brl, 2),
+        "currency": "BRL",
         "total_brl": round(total_brl, 2),
-        "max_budget_usd": budget,
+        "max_budget_brl": budget,
         "max_budget": budget,
         "within_budget": within,
         "missing": missing,
         "cards": priced_cards,
         "card_count_priced": len(priced_cards),
-        "priced_brl": n_brl,
-        "priced_usd": n_usd,
+        "priced_brl": len(priced_cards),
+        "price_source": "ligamagic",
     }
 
 
@@ -611,9 +832,10 @@ def run_deckbuilder_tool(name: str, args: dict[str, Any]) -> str:
             names = args.get("card_names") or []
             if not isinstance(names, list):
                 names = [str(names)]
-            max_budget = args.get("max_budget_usd", None)
+            # Aceita max_budget_brl; alias legado max_budget_usd (mesmo valor em R$).
+            max_budget = args.get("max_budget_brl", args.get("max_budget_usd", None))
             payload = summarize_package_budget(
-                [str(n) for n in names], max_budget_usd=max_budget
+                [str(n) for n in names], max_budget_brl=max_budget
             )
             return json.dumps(payload, ensure_ascii=False)
         return json.dumps({"error": f"Tool desconhecida: {name}"}, ensure_ascii=False)
