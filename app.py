@@ -313,10 +313,10 @@ def open_settings_dialog() -> None:
 
 def _render_gate_shell() -> None:
     """Shell visual igual ao app (sidebar + área principal) por trás do dialog."""
-    # Primeira pintura da entrada espelha a captura (Deckbuilder + geração rápida).
+    # Primeira pintura da entrada espelha a captura (Deckbuilder + chat).
     if not st.session_state.get("_gate_bootstrapped"):
         st.session_state.app_mode = MODE_DECKBUILDER
-        st.session_state.deck_submode = "Geração rápida"
+        st.session_state.deck_submode = "Criar do zero"
         st.session_state._gate_bootstrapped = True
 
     with st.sidebar:
@@ -354,7 +354,7 @@ def _render_gate_shell() -> None:
             "Orçamento em R$ via LigaMagic (mercado Brasil)."
         )
         if "gate_deck_submode_preview" not in st.session_state:
-            st.session_state.gate_deck_submode_preview = "Geração rápida"
+            st.session_state.gate_deck_submode_preview = "Criar do zero"
         st.radio(
             "Fluxo",
             options=["Criar do zero", "Melhorar lista", "Geração rápida"],
@@ -362,26 +362,11 @@ def _render_gate_shell() -> None:
             key="gate_deck_submode_preview",
             disabled=True,
         )
-        st.subheader("Geração rápida (autopilot)")
-        st.caption(
-            "Motor Python: comandante → pool → identidade → budget LigaMagic (R$)/curva → lista. "
-            "Sem micro-confirmações dos Passos 1–5. A primeira geração pode demorar "
-            "(consulta de preços)."
-        )
-        with st.form("gate_autopilot_preview"):
-            st.text_input("Comandante", value="Niv-Mizzet, Parun", disabled=True)
-            st.select_slider(
-                "Bracket", options=[1, 2, 3, 4, 5], value=3, disabled=True
-            )
-            st.number_input(
-                "Orçamento máximo (R$ — LigaMagic)",
-                min_value=0.0,
-                value=800.0,
-                step=50.0,
-                disabled=True,
-            )
-            st.form_submit_button("Gerar deck", type="primary", disabled=True)
         st.info(DECKBUILDER_BOOTSTRAP_MESSAGE)
+        st.caption(
+            "Após aplicar as Configurações, use o chat para briefing "
+            "(comandante, Bracket, orçamento). Geração rápida fica no fluxo homônimo."
+        )
     else:
         st.title("⚖️ Juiz Azorius")
         st.caption(
@@ -950,7 +935,7 @@ def _render_autopilot_panel(provider) -> None:
     st.subheader("Geração rápida (autopilot)")
     st.caption(
         "Motor Python: comandante → pool → identidade → budget LigaMagic (R$)/curva → lista. "
-        "Sem micro-confirmações dos Passos 1–5. A primeira geração pode demorar (consulta de preços)."
+        "Sem micro-confirmações dos Passos 1–6. A primeira geração pode demorar (consulta de preços)."
     )
     with st.form("autopilot_form"):
         commander = st.text_input("Comandante", placeholder="Niv-Mizzet, Parun")

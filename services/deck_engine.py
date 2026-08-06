@@ -11,7 +11,14 @@ import json
 from collections import Counter
 from typing import Any
 
+from .deck_composition import (
+    LAND_SLOTS_MAX,
+    LAND_SLOTS_MIN,
+    SPELL_ROLE_FILL_ORDER,
+    spell_role_mins,
+)
 from .scryfall_api import (
+    fetch_card_details,
     fetch_card_market_info,
     fetch_commander,
     fetch_commander_card_pool,
@@ -19,25 +26,21 @@ from .scryfall_api import (
 
 DECK_SIZE = 99
 # Quotas de terreno (pad de básicos só preenche estes slots — nunca come magias).
-LAND_SLOTS_MIN = 34
-LAND_SLOTS_MAX = 38
+# LAND_SLOTS_* vêm de deck_composition (template 35–38).
 # Se faltar mais que isto de magias precificadas, a geração falha em vez de virar 80 basics.
 MAX_SPELL_SHORTFALL = 20
-# Alvos mínimos de role entre as magias (heurística barata).
-SPELL_ROLE_TARGETS: dict[str, int] = {
-    "ramp": 8,
-    "draw": 8,
-    "interaction": 8,
-}
+# Alvos mínimos de role entre as magias (template de composição).
+SPELL_ROLE_TARGETS: dict[str, int] = spell_role_mins()
 
 # Curvas-alvo por Bracket (slots por CMC 0..7+). Soma de cada mapa = 99.
 # Brackets baixos: mais top-end / mana barata; altos: mais low-curve.
+# CMC 0 (lands) fica entre LAND_SLOTS_MIN e LAND_SLOTS_MAX.
 BRACKET_CURVES: dict[int, dict[int, int]] = {
     1: {0: 38, 1: 8, 2: 12, 3: 14, 4: 12, 5: 8, 6: 5, 7: 2},
     2: {0: 37, 1: 9, 2: 13, 3: 14, 4: 12, 5: 8, 6: 4, 7: 2},
     3: {0: 36, 1: 11, 2: 15, 3: 14, 4: 11, 5: 7, 6: 3, 7: 2},
     4: {0: 35, 1: 14, 2: 16, 3: 14, 4: 10, 5: 6, 6: 3, 7: 1},
-    5: {0: 34, 1: 16, 2: 18, 3: 14, 4: 9, 5: 5, 6: 2, 7: 1},
+    5: {0: 35, 1: 15, 2: 18, 3: 14, 4: 9, 5: 5, 6: 2, 7: 1},
 }
 
 _BASIC_TYPE_TO_COLOR = {
@@ -188,7 +191,7 @@ def land_fits_commander_colors(card: dict, commander_colors: list[str]) -> bool:
 
 
 def classify_spell_role(card: dict) -> str:
-    """Heurística mínima: ramp / draw / interaction / other (não-land)."""
+    """Heurística: ramp / draw / removal / board_wipe / synergy / land."""
     if _is_land(card):
         return "land"
     type_line = (card.get("type_line") or "").lower()
@@ -200,25 +203,23 @@ def classify_spell_role(card: dict) -> str:
         for k in (
             "destroy all",
             "exile all",
+            "each creature",
+            "all creatures",
+            "board wipe",
+        )
+    ) or "wrath" in name:
+        return "board_wipe"
+    if any(
+        k in oracle
+        for k in (
             "destroy target",
             "exile target",
             "counter target",
             "return target",
             "fight",
         )
-    ) or any(k in name for k in ("wrath", "removal")):
-        return "interaction"
-    if any(
-        k in oracle
-        for k in (
-            "hexproof",
-            "indestructible",
-            "protection from",
-            "ward",
-            "can't be countered",
-        )
-    ):
-        return "interaction"
+    ) or "removal" in name:
+        return "removal"
     if (
         any(
             k in oracle
@@ -245,7 +246,7 @@ def classify_spell_role(card: dict) -> str:
         )
     ):
         return "draw"
-    return "other"
+    return "synergy"
 
 
 def filter_pool_for_commander(
@@ -371,12 +372,7 @@ def enforce_budget_and_curve(
         return True
 
     # --- Magias primeiro (prioridade do orçamento) ---
-    by_role: dict[str, list[dict]] = {
-        "ramp": [],
-        "draw": [],
-        "interaction": [],
-        "other": [],
-    }
+    by_role: dict[str, list[dict]] = {role: [] for role in SPELL_ROLE_FILL_ORDER}
     for card in spells_pool:
         role = classify_spell_role(card)
         if role == "land":
@@ -385,9 +381,10 @@ def enforce_budget_and_curve(
     for role in by_role:
         by_role[role].sort(key=_card_price)
 
-    # 1) Mínimos de role (baratas dentro de cada pacote).
+    # 1) Mínimos de role na ordem do template (ramp → draw → removal → wipe → sinergia).
     role_filled = {role: 0 for role in SPELL_ROLE_TARGETS}
-    for role, need in SPELL_ROLE_TARGETS.items():
+    for role in SPELL_ROLE_FILL_ORDER:
+        need = SPELL_ROLE_TARGETS.get(role, 0)
         for card in by_role.get(role, []):
             if role_filled[role] >= need:
                 break
@@ -395,7 +392,7 @@ def enforce_budget_and_curve(
                 role_filled[role] += 1
 
     # 2) Resto: sempre as mais baratas globais (curva vira métrica, não travamento).
-    # Em orçamento baixo, forçar CMC-alvo impede encher os 63 slots.
+    # Em orçamento baixo, forçar CMC-alvo impede encher os slots de magia.
     for card in sorted(spells_pool, key=_card_price):
         if len(selected_spells) >= spell_slots:
             break
@@ -560,11 +557,30 @@ Shortfall de magias: {shortfall}
 
 DECKBUILDER_TOOLS: list[dict[str, Any]] = [
     {
+        "name": "lookup_card",
+        "description": (
+            "Busca dados oficiais de uma carta (comandante ou outra): nome, "
+            "identidade de cor, mana_cost, type_line, oracle_text, power/toughness. "
+            "OBRIGATÓRIO chamar assim que o jogador nomear o comandante no Passo 0, "
+            "antes de pedir texto da carta ou montar sinergia. Nunca invente regras."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "card_name": {
+                    "type": "string",
+                    "description": "Nome da carta (inglês preferencial; aceita fuzzy).",
+                }
+            },
+            "required": ["card_name"],
+        },
+    },
+    {
         "name": "lookup_card_prices",
         "description": (
             "Consulta preços em R$ (BRL). Preferência LigaMagic; se não houver "
             "preço local, estima BRL internamente. Sempre fale em R$ com o "
-            "jogador — nunca mencione USD/dólar/Scryfall. Cartas sem preço "
+            "jogador — nunca mencione USD/dólar. Cartas sem preço "
             "retornam found=false. Use com orçamento definido."
         ),
         "parameters": {
@@ -604,6 +620,17 @@ DECKBUILDER_TOOLS: list[dict[str, Any]] = [
         },
     },
 ]
+
+
+def lookup_card(card_name: str) -> dict[str, Any]:
+    """Resolve carta no Scryfall para o agentic Deckbuilder (oracle + CI)."""
+    query = (card_name or "").strip()
+    if not query:
+        return {"found": False, "query": "", "error": "card_name vazio"}
+    details = fetch_card_details(query)
+    if details is None:
+        return {"found": False, "query": query, "error": "Carta não encontrada"}
+    return {"found": True, "query": query, **details}
 
 
 def build_autopilot_deck(
@@ -822,6 +849,10 @@ def summarize_package_budget(
 def run_deckbuilder_tool(name: str, args: dict[str, Any]) -> str:
     """Dispatcher de tools: executa e serializa o resultado em JSON."""
     try:
+        if name == "lookup_card":
+            card_name = args.get("card_name") or args.get("name") or ""
+            payload = lookup_card(str(card_name))
+            return json.dumps(payload, ensure_ascii=False)
         if name == "lookup_card_prices":
             names = args.get("card_names") or []
             if not isinstance(names, list):

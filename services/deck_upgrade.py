@@ -2,6 +2,7 @@
 
 Módulo puro: normaliza via Scryfall (identidade/oracle) e precifica em R$
 via LigaMagic. Orçamento do mercado Brasil não usa USD.
+Metas de pacote vêm de services.deck_composition.
 """
 
 from __future__ import annotations
@@ -10,19 +11,19 @@ from collections import defaultdict
 from typing import Any
 
 from services.config import resolve_brl_price
+from services.deck_composition import (
+    PACKAGE_LABELS_PT,
+    PACKAGE_RANGES,
+    format_range,
+    gaps_from_counts,
+)
 from services.decklist_parse import parse_pasted_decklist
 from services.ligamagic_prices import fetch_ligamagic_brl
 from services.scryfall_api import fetch_card_market_info, fetch_commander
 
+# Compat: mínimo da faixa por pacote (sem protection).
 PACKAGE_TARGETS: dict[str, int] = {
-    "ramp": 10,
-    "draw": 10,
-    "removal": 8,
-    "board_wipe": 2,
-    "protection": 4,
-    "synergy": 0,  # sem meta fixa
-    "lands": 36,
-    "other": 0,
+    pkg: lo for pkg, (lo, _hi) in PACKAGE_RANGES.items()
 }
 
 
@@ -59,17 +60,6 @@ def _classify(card: dict[str, Any]) -> str:
     if any(
         k in oracle
         for k in (
-            "hexproof",
-            "indestructible",
-            "protection from",
-            "can't be countered",
-            "ward",
-        )
-    ):
-        return "protection"
-    if any(
-        k in oracle
-        for k in (
             "add {",
             "search your library for a land",
             "put a land",
@@ -88,7 +78,8 @@ def _classify(card: dict[str, Any]) -> str:
         )
     ):
         return "draw"
-    return "other"
+    # Proteção e restante contam como sinergia/tema na auditoria de gaps.
+    return "synergy"
 
 
 def normalize_decklist(text: str) -> dict[str, Any]:
@@ -126,20 +117,7 @@ def normalize_decklist(text: str) -> dict[str, Any]:
         by_package[pkg].append(entry)
 
     counts = {pkg: sum(c["qty"] for c in cards) for pkg, cards in by_package.items()}
-    gaps: list[dict[str, Any]] = []
-    for pkg, target in PACKAGE_TARGETS.items():
-        if target <= 0:
-            continue
-        have = counts.get(pkg, 0)
-        if have < target:
-            gaps.append(
-                {
-                    "package": pkg,
-                    "have": have,
-                    "target": target,
-                    "deficit": target - have,
-                }
-            )
+    gaps = gaps_from_counts(counts)
 
     total_cards = sum(e["qty"] for e in resolved)
     return {
@@ -194,16 +172,23 @@ def build_upgrade_brief(
             + ", ".join(analysis["unpriced"][:20])
         )
 
-    lines.append("### Contagem por pacote")
+    lines.append("### Contagem por pacote (template)")
+    for pkg, (lo, hi) in PACKAGE_RANGES.items():
+        have = analysis["counts"].get(pkg, 0)
+        label = PACKAGE_LABELS_PT.get(pkg, pkg)
+        lines.append(f"- {label} ({pkg}): {have} (alvo {format_range(lo, hi)})")
     for pkg, count in sorted(analysis["counts"].items()):
+        if pkg in PACKAGE_RANGES:
+            continue
         lines.append(f"- {pkg}: {count}")
 
     if analysis["gaps"]:
-        lines.append("### Gaps (heurística)")
+        lines.append("### Gaps (heurística vs mínimo da faixa)")
         for gap in analysis["gaps"]:
+            label = PACKAGE_LABELS_PT.get(gap["package"], gap["package"])
             lines.append(
-                f"- {gap['package']}: tem {gap['have']}, alvo ~{gap['target']} "
-                f"(faltam ~{gap['deficit']})"
+                f"- {label}: tem {gap['have']}, alvo {gap['target_label']} "
+                f"(faltam ~{gap['deficit']} para o mínimo)"
             )
     else:
         lines.append("### Gaps: nenhum déficit óbvio nos pacotes medidos.")

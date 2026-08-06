@@ -66,9 +66,11 @@ Protótipo local com dois modos:
 ## Modo Deckbuilder
 
 1. Selecione **Modo Deckbuilder** — escolha o fluxo: **Criar do zero**, **Melhorar lista** ou **Geração rápida**.
-2. **Criar do zero**: briefing → pacotes um a um (wincons → ramp/draw → sinergia → interação → lands).
+2. **Criar do zero**: briefing → pacotes pelo template (sinergia → ramp → draw → remoções → wipes → lands).
 3. **Melhorar lista**: cole `Nx Nome`, audite gaps e peça upgrades no chat.
 4. **Geração rápida**: formulário (comandante + bracket + budget) → lista do motor Python.
+
+Template de composição (~99 cartas): terrenos 35–38, ramp 10–12, draw 10, remoções 10–12, board wipes 3–4, sinergia/tema 25–30.
 
 Listas com `# Categoria` aparecem em expanders; no Juiz, passe o mouse no nome da carta para o preview.
 No Deckbuilder, a sidebar **Lista do deck** acumula os pacotes sugeridos (com download).

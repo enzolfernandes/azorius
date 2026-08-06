@@ -396,6 +396,39 @@ def _normalize_pool_card(card: dict) -> dict:
     }
 
 
+def fetch_card_details(card_name: str) -> dict | None:
+    """Dados ricos para o Deckbuilder agentic (oracle, CI, P/T, legalidade)."""
+    query = (card_name or "").strip()
+    if not query:
+        return None
+    card = _lookup_card_raw(query)
+    if card is None:
+        return None
+    faces = card.get("card_faces") or []
+    power = card.get("power")
+    toughness = card.get("toughness")
+    if (power is None or toughness is None) and faces:
+        power = faces[0].get("power", power)
+        toughness = faces[0].get("toughness", toughness)
+    mana_cost = card.get("mana_cost", "") or ""
+    if not mana_cost and faces:
+        mana_cost = faces[0].get("mana_cost", "") or ""
+    return {
+        "name": card.get("name", query),
+        "color_identity": list(card.get("color_identity") or []),
+        "mana_cost": mana_cost,
+        "cmc": float(card.get("cmc") or 0),
+        "type_line": card.get("type_line", "") or "",
+        "oracle_text": _extract_oracle_text(card),
+        "power": power,
+        "toughness": toughness,
+        "image_url": _extract_image_url(card),
+        "legalities": {
+            "commander": (card.get("legalities") or {}).get("commander"),
+        },
+    }
+
+
 def fetch_commander(name: str) -> dict | None:
     """Resolve um comandante por nome (fuzzy/multilíngue) para o Deckbuilder.
 

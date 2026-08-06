@@ -8,6 +8,7 @@ Backlog e status. Itens `[x]` já estão no código.
 - [x] **Geração de deck rápida** — autopilot via `build_autopilot_deck` + frase opcional do LLM.
 - [x] **Modo de melhoria de deck** — colar lista → gaps (`deck_upgrade.py`) → prompt dedicado.
 - [x] **Preços via LigaMagic** — `ligamagic_prices.py` (BRL) em todos os modos do Deckbuilder; sem fallback USD no orçamento (mercado Brasil primeiro).
+- [x] **Template de composição** — faixas em `deck_composition.py` (lands 35–38, ramp 10–12, draw 10, removal 10–12, wipes 3–4, sinergia 25–30); prompts, gaps e autopilot.
 
 ## UX / interface
 
