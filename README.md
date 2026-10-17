@@ -1,141 +1,71 @@
-# Azorius — Juiz de Magic: The Gathering (Nível 3)
+# Azorius — meu assistente de regras de Magic: The Gathering
 
-Protótipo local de um juiz de regras de MTG com arquitetura RAG (Retrieval-Augmented Generation):
-as Regras Abrangentes oficiais são indexadas em um banco vetorial (ChromaDB), os dados exatos das
-cartas vêm da API do Scryfall e a resposta final é gerada por um LLM (Gemini, OpenAI ou Claude)
-usando apenas o contexto recuperado — sem alucinações.
+Desenvolvo este protótipo em Python para consultar regras e cartas de Magic: The Gathering em uma interface Streamlit. Combino recuperação de regras em ChromaDB, dados de cartas da API Scryfall e geração de respostas com um provedor de LLM configurável.
 
-## Arquitetura
+## Como organizei o projeto
 
-- `app.py` — interface Streamlit (exclusivamente UI; nenhuma lógica de negócio).
-- `services/` — módulos puros, sem nenhuma importação de Streamlit:
-  - `config.py` — validação de provedor/chave (UI ou `.env`).
-  - `providers.py` — factory de provedores (LLM + embeddings), ponto único de injeção de dependência.
-  - `rules_setup.py` — download automático das Comprehensive Rules quando o arquivo falta.
-  - `scryfall_api.py` — consulta de cartas na API do Scryfall.
-  - `vector_db.py` — chunking das regras e persistência/consulta no ChromaDB.
-  - `llm_engine.py` — montagem do prompt de juiz e geração em streaming.
-- `scripts/setup_rules.py` — download automático do arquivo oficial de Regras Abrangentes (.txt).
-- `data/` — regras baixadas e banco vetorial persistente (gerados localmente).
+| Camada | Arquivos · Função |
+| --- | --- |
+| Interface | [app.py](app.py) · Chat, seleção de provedor, histórico de cartas e exibição das respostas |
+| Configuração e provedores | [config.py](services/config.py), [providers.py](services/providers.py) · Configurações e interface comum para Gemini, OpenAI e Claude |
+| Regras | [rules_setup.py](services/rules_setup.py), [vector_db.py](services/vector_db.py) · Download das Comprehensive Rules, divisão por regras numeradas e índice vetorial persistente |
+| Cartas | [scryfall_api.py](services/scryfall_api.py) · Consulta de nomes, texto das cartas, imagens e rulings |
+| Respostas | [llm_engine.py](services/llm_engine.py) · Extração de nomes, reescrita da consulta, contexto e resposta em streaming |
 
-## Setup
+Meu histórico registra a [separação da configuração e dos provedores](https://github.com/enzolfernandes/azorius/commit/2c2d69c830689bec80dbc3a85196ac3fe167951f) e o [tratamento do histórico de cartas e das consultas](https://github.com/enzolfernandes/azorius/commit/f7b5f69a6665e9bb5e5d37f2921c58a9713a3cba). Os SDKs, modelos, ChromaDB e dados consultados são serviços e dependências externos.
 
-1. Instale as dependências:
+## Preparar e executar localmente
 
-   ```bash
-   pip install -r requirements.txt
+1. Clone o repositório e entre na pasta:
+
+   ```shell
+   git clone https://github.com/enzolfernandes/azorius.git
+   cd azorius
+   python -m venv .venv
    ```
 
-2. (Opcional) Preencha o `.env` para uso solo — a sidebar da app também aceita provedor e chave:
+2. Ative o ambiente virtual (`.venv\Scripts\Activate.ps1` no PowerShell ou `source .venv/bin/activate` em bash) e instale:
 
-   ```
-   LLM_PROVIDER=gemini        # ou "openai" ou "claude"
-   GOOGLE_API_KEY=...         # se gemini
-   OPENAI_API_KEY=...         # se openai
-   ANTHROPIC_API_KEY=...      # se claude
+   ```shell
+   python -m pip install -r requirements.txt
    ```
 
-   Com Claude, o chat usa a API Anthropic; os embeddings do RAG são locais (MiniLM via
-   Chroma), num índice separado — a primeira ingestão desse provedor pode demorar mais.
+3. Configure um provedor e a respectiva chave na barra lateral. Para uso individual, o código também lê um `.env` local:
 
-3. As Comprehensive Rules são baixadas automaticamente na primeira execução se
-   `data/MagicCompRules.txt` não existir. Para baixar manualmente:
-
-   ```bash
-   python scripts/setup_rules.py
+   ```dotenv
+   LLM_PROVIDER=gemini
+   GOOGLE_API_KEY=SUBSTITUA_LOCALMENTE
+   # Alternativas: LLM_PROVIDER=openai com OPENAI_API_KEY
+   # ou LLM_PROVIDER=claude com ANTHROP_API_KEY
    ```
 
-4. Rode a aplicação (a primeira execução por provedor ingere as regras no ChromaDB, o que leva alguns minutos):
+4. Inicie a interface:
 
-   ```bash
+   ```shell
    streamlit run app.py
    ```
 
-5. Na barra lateral, escolha o provedor (Gemini, OpenAI ou Claude), cole a chave de API e clique em **Aplicar**.
+As regras são baixadas quando faltam em `data/MagicCompRules.txt`; o comando manual é `python scripts/setup_rules.py`. A primeira ingestão cria o índice por provedor. O caminho padrão é `data/chroma/${PROVEDOR}`; em caminhos com caracteres não ASCII no Windows, a configuração usa um diretório alternativo local. Claude usa a função de embeddings local do Chroma; os demais provedores usam suas APIs de embeddings.
 
-## Compartilhar com pessoas próximas
+## Usar
 
-Cada visitante usa a **própria** chave na sidebar (não compartilhe a sua no `.env` do host).
+Escreva a dúvida citando as cartas pelo nome. Para indicar um nome explicitamente, use `[[Nome da Carta]]`. A interface mantém o histórico de cartas e apresenta a resposta com referências às regras recuperadas.
 
-### Na mesma rede (LAN)
+## Estado e limites
 
-No computador host:
+O repositório contém a implementação do protótipo. Esta revisão de documentação não executou a aplicação, não consumiu APIs e não mediu a qualidade das respostas. A recuperação de contexto ajuda a fundamentar as respostas, mas não garante correção: confira a regra citada e sua versão. "Juiz" é o papel da interface, não uma certificação de arbitragem.
 
-```bash
-streamlit run app.py --server.address 0.0.0.0 --server.port 8501
-```
+O `requirements.txt` não fixa versões, e a disponibilidade dos modelos depende do provedor. O índice existente pode conservar conteúdo anterior quando o texto das regras muda; revisar atualização e reconstrução do índice faz parte da manutenção. Não há suíte de testes ou relatório de avaliação no estado inspecionado.
 
-Descubra o IP local do host (ex.: `ipconfig` no Windows) e acesse no outro dispositivo:
+Para compartilhamento, revise autenticação, custos e tratamento de chaves antes de expor o app: o cache do índice é por provedor e pode usar a chave da primeira sessão que o inicializa. Uma chave digitada na interface é processada pelo servidor do app. As antigas instruções de hospedagem eram possibilidades de implantação, não prova de uma demo publicada. A branch atual é `master`.
 
-```
-http://192.168.x.x:8501
-```
+## Fontes e autoria
 
-### Fora da rede (tunnel)
+- [Comprehensive Rules — Wizards of the Coast](https://magic.wizards.com/en/rules)
+- [API Scryfall](https://scryfall.com/docs/api)
+- [Dependências do projeto](requirements.txt)
+- [Meu histórico de alterações](https://github.com/enzolfernandes/azorius/commits/master/)
 
-Exponha a porta 8501 com um tunnel, por exemplo:
+Magic: The Gathering, regras e imagens de cartas pertencem aos respectivos titulares. O repositório não contém uma licença geral declarada para o código.
 
-- [ngrok](https://ngrok.com/): `ngrok http 8501`
-- [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/): `cloudflared tunnel --url http://localhost:8501`
-
-Envie a URL gerada. O host precisa ter rodado `scripts/setup_rules.py` antes; a primeira abertura por provedor (Gemini vs OpenAI) pode demorar pela ingestão do Chroma.
-
-### Streamlit Community Cloud
-
-Hospedagem gratuita da Streamlit a partir do GitHub. Boa para URL pública; o disco é limitado/efêmero, então a **primeira ingestão do Chroma** pode ser lenta ou precisar ser refeita após restart.
-
-#### Pré-requisitos
-
-1. Conta em [share.streamlit.io](https://share.streamlit.io) e GitHub conectado.
-2. Repositório do Azorius no GitHub (público ou privado com permissão ao Streamlit).
-3. Push do código atualizado: na primeira execução o app **baixa sozinho** as
-   Comprehensive Rules se `data/MagicCompRules.txt` não estiver no repo.
-   Não versione a pasta `data/chroma/`.
-
-#### Criar o app
-
-1. Em [share.streamlit.io](https://share.streamlit.io) → **New app**.
-2. Selecione o repositório, a branch (ex.: `main`) e o arquivo principal: `app.py`.
-3. **Deploy**.
-
-#### Secrets (opcional)
-
-Se quiser pré-preencher provedor/chave via ambiente (fallback da sidebar), em **App settings → Secrets**:
-
-```toml
-LLM_PROVIDER = "gemini"
-GOOGLE_API_KEY = "sua-chave"
-# OPENAI_API_KEY = "..."
-# ANTHROPIC_API_KEY = "..."
-```
-
-Recomendado para demo: deixar a sidebar e cada visitante colar a **própria** chave (não exponha a sua nos Secrets se o app for público).
-
-#### Depois do deploy
-
-1. Abra a URL `https://….streamlit.app`.
-2. Na sidebar, escolha o provedor, cole a chave e clique em **Aplicar**.
-3. A **primeira** visita por provedor baixa/ingere o índice Chroma — pode levar vários minutos; não feche a aba.
-4. Push na branch redesploya o app.
-
-#### Limitações
-
-- App “dorme” após ociosidade; a próxima visita demora a acordar.
-- Disco não é storage permanente confiável: o Chroma pode ser reconstruído.
-- Claude usa embeddings locais (MiniLM): ingestão ainda mais pesada no plano free.
-- Se a build falhar, veja **Manage app → Logs**.
-
-Para testes rápidos com amigos mantendo o índice estável na sua máquina, preferir tunnel/LAN (seções acima).
-
-## Uso
-
-Digite sua dúvida no chat citando as cartas pelo nome, naturalmente:
-
-> Se eu controlo Doubling Season e uso a habilidade -2 da Vraska, Golgari Queen, quantas lealdades ela perde?
-
-O sistema identifica as cartas via LLM (aceita apelidos e nomes em português, traduzindo para o
-nome oficial em inglês). Se quiser forçar um nome exato, use [[colchetes duplos]] — eles têm
-prioridade e pulam a etapa de identificação.
-
-As imagens das cartas citadas aparecem na barra lateral e a resposta do juiz cita os números
-das regras oficiais usadas.
+*Apresentação revisada em 17/10/2026; implementação preservada.*
