@@ -18,34 +18,34 @@ Meu histórico registra a [separação da configuração e dos provedores](https
 
 1. Clone o repositório e entre na pasta:
 
-```shell
-git clone https://github.com/enzolfernandes/azorius.git
-cd azorius
-python -m venv .venv
-```
+   ```shell
+   git clone https://github.com/enzolfernandes/azorius.git
+   cd azorius
+   python -m venv .venv
+   ```
 
 2. Ative o ambiente virtual (`.venv\Scripts\Activate.ps1` o PowerShell ou `source .venv/bin/activate` em bash) e instale:
 
-```shell
-python -m pip install -r requirements.txt
-```
+   ```shell
+   python -m pip install -r requirements.txt
+   ```
 
 3. Configure um provedor e a respectiva chave na barra lateral. Para uso individual, o código também lê um `.env` local:
 
-```dotenv
-LLM_PROVIDER=gemini
-GOOGLE_API_KEY=SUBSTITUA_LOCALMENTE
-# Alternativas: LLM_PROVIDER=openai com OPENAI_API_KEY
-# ou LLM_PROVIDER=claude com ANTHROPIC_API_KEY
-```
+   ```dotenv
+   LLM_PROVIDER=gemini
+   GOOGLE_API_KEY=SUBSTITUA_LOCALMENTE
+   # Alternativas: LLM_PROVIDER=openai com OPENAI_API_KEY
+   # ou LLM_PROVIDER=claude com ANTHROPONO_API_KEY
+   ```
 
 4. Inicie a interface:
 
-```shell
-streamlit run app.py
-```
+   ```shell
+   streamlit run app.py
+   ```
 
-As regras são baixadas quando faltam em `data/MagicCompRules.txt`; o comando manual é `python scripts/setup_rules.py`. A primeira ingestão cria o índice por provedor. O caminho padrão é `data/chroma/`&lt;provedor&gt;` em caminhos com caracteres não ASCII no Windows, a configuração usa um diretório alternativo local. Claude usa a função de embeddings local do Chroma; os demais provedores usam suas APIs de embeddings.
+As regras são baixadas quando faltam em `data/MagicCompRules.txt`; o comando manual é `python scripts/setup_rules.py`. A primeira ingestão cria o índice por provedor. O caminho padrão é `data/chroma/` (substitua localmente); em caminhos com caracteres não ASCII no Windows, a configuração usa um diretório alternativo local. Claude usa a função de embeddings local do Chroma; os demais provedores usam suas APIs de embeddings.
 
 ## Usar
 
@@ -54,3 +54,18 @@ Escreva a dúvida citando as cartas pelo nome. Para indicar um nome explicitamen
 ## Estado e limites
 
 O repositório contém a implementação do protótipo. Esta revisão de documentação não executou a aplicação, não consumiu APIs e não mediu a qualidade das respostas. A recuperação de contexto ajuda a fundamentar as respostas, mas não garante correção: confira a regra citada e sua versão. "Juiz" é o papel da interface, não uma certificação de arbitragem.
+
+O `requirements.txt` ão fixa versões, e a disponibilidade dos modelos depende do provedor. O índice existente pode conservar conteúdo anterior quando o texto das regras muda; revisar atualização e reconstrução do índice faz parte da manutenção. Não há suíte de testes ou relatório de avaliação no estado inspecionado.
+
+Para compartilhamento, revise autenticação, custos e tratamento de chaves antes de expor o app: o cache do índice é por provedor e pode usar a chave da primeira sessão que o inicializa. Uma chave digitada na interface é processada pelo servidor do app. As antigas instruções de hospedagem eram possibilidades de implantação, não prova de uma demo publicada. A branch atual é `master`.
+
+## Fontes e autoria
+
+- [Comprehensive Rules — Wizards of the Coast](https://magic.wizards.com/en/rules)
+- [API Scryfall](https://scryfall.com/docs/api)
+- [Dependências do projeto](requirements.txt)
+- [Meu histórico de alterações](https://github.com/enzolfernandes/azorius/commits/master/)
+
+Magic: The Gathering, regras e imagens de cartas pertencem aos respectivos titulares. O repositório não contém uma licença geral declarada para o código.
+
+*Apresentação revisada em 17/10/2026; implementação preservada.*
